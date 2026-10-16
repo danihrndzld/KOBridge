@@ -4,7 +4,7 @@ import { i18n, dec, type Lang } from './i18n.svelte'
 export const KO = '/mnt/us/koreader'
 
 export type Status = { host: string; battery: number | null; free_kb: number; total_kb: number; reader_running: boolean }
-export type Settings = { backup_dir: string; vault_dir: string; backup_books: boolean; auto_backup: boolean; last_auto_backup: string; ai_model: Model; lang: Lang; show_sdr: boolean }
+export type Settings = { backup_dir: string; vault_dir: string; backup_books: boolean; auto_backup: boolean; last_auto_backup: string; ai_model: Model; lang: Lang; show_sdr: boolean; mtp_client: string }
 export type BackupFile = { name: string; path: string; size: number; modified: number }
 export type BackupSize = { books_bytes: number; books_files: number; base_bytes: number; full_bytes: number; bytes_per_sec: number }
 export type Day = { date: string; minutes: number }
@@ -27,6 +27,7 @@ export type StoreStep = { step: 'backup' | 'download' | 'send' | 'done'; done: n
 export type FsEntry = { name: string; kind: 'dir' | 'file' | 'link'; size: number; mtime: number }
 export type FsOutcome = { state: 'OK' | 'EXISTS' | 'ERR' | 'KEPT'; path: string }
 export type FsChange = { results: FsOutcome[]; dirs: Record<string, FsEntry[]> }
+export type UsbStatus = { supported: boolean; code: string; reason: string; cable: boolean; state: 'idle' | 'connected' | 'busy'; plugin: boolean; udc: string; client: string | null }
 export type SshInfo = { key_path: string; public_key: string | null; config_path: string; has_host: boolean; hostname: string; port: string; user: string; identity: string; usb: string | null }
 
 export const api = {
@@ -93,6 +94,8 @@ export const api = {
   fsMkdir: (path: string) => invoke<FsChange>('fs_mkdir', { path }),
   fsUpload: (path: string, dir: string) => invoke<FsChange>('fs_upload', { path, dir }),
   fsDownload: (path: string, dest: string) => invoke<number>('fs_download', { path, dest }),
+  usb: (op: 'status' | 'connect' | 'disconnect' | 'reset') => invoke<UsbStatus>(`usb_${op}`),
+  usbOpen: () => invoke<void>('usb_open'),
 }
 
 export const fmtBytes = (n: number) =>

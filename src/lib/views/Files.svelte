@@ -4,6 +4,7 @@
   import { Menu } from '@tauri-apps/api/menu'
   import { open as pick, save, ask } from '@tauri-apps/plugin-dialog'
   import Loading from '../Loading.svelte'
+  import Cable from '../Cable.svelte'
   import { api, errText, fmtBytes, type FsEntry } from '../api'
   import { app, refreshStatus, saveSettings } from '../store.svelte'
   import { t, dec, i18n } from '../i18n.svelte'
@@ -287,6 +288,8 @@
       <button class="btn ghost" disabled={!online || refreshing} onclick={refresh}>{refreshing ? t('Refreshing…', 'Actualizando…') : t('Refresh', 'Actualizar')}</button>
     </div>
   </div>
+
+  <Cable />
 
   <div class="bar">
     <nav class="crumbs" aria-label={t('Path', 'Ruta')}>
