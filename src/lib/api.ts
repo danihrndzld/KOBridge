@@ -27,7 +27,7 @@ export type StoreStep = { step: 'backup' | 'download' | 'send' | 'done'; done: n
 export type FsEntry = { name: string; kind: 'dir' | 'file' | 'link'; size: number; mtime: number }
 export type FsOutcome = { state: 'OK' | 'EXISTS' | 'ERR' | 'KEPT'; path: string }
 export type FsChange = { results: FsOutcome[]; dirs: Record<string, FsEntry[]> }
-export type UsbStatus = { supported: boolean; code: string; reason: string; cable: boolean; state: 'idle' | 'connected' | 'busy'; plugin: boolean; udc: string; client: string | null }
+export type UsbStatus = { supported: boolean; code: string; reason: string; cable: boolean; state: 'idle' | 'connected' | 'busy'; plugin: boolean; udc: string; udc_state: string; client: string | null }
 export type SshInfo = { key_path: string; public_key: string | null; config_path: string; has_host: boolean; hostname: string; port: string; user: string; identity: string; usb: string | null }
 
 export const api = {

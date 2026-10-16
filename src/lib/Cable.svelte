@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { ask } from '@tauri-apps/plugin-dialog'
   import { api, errText, type UsbStatus } from './api'
-  import { app } from './store.svelte'
+  import { app, explain } from './store.svelte'
   import { t } from './i18n.svelte'
   import { fs, load } from './files.svelte'
 
@@ -14,11 +14,15 @@
   let last: 'connect' | 'disconnect' | 'reset' = 'connect'
   let checking = false
 
+  // NotCharging also fires on a full battery with the cable in, so only a link no computer holds counts
+  const unplugged = (s: UsbStatus | null) => s?.state === 'connected' && !s.cable && s.udc_state !== 'configured'
+
   async function check() {
     if (checking || busy) return
     checking = true
     try { const s = await api.usb('status'); if (!busy) usb = s } catch { /* the Kindle went offline; app.status shows it */ }
     finally { checking = false }
+    if (unplugged(usb)) act('disconnect')
   }
 
   async function act(op: 'connect' | 'disconnect' | 'reset') {
@@ -27,7 +31,8 @@
     try {
       usb = await api.usb(op)
     } catch (e) {
-      error = errText(e)
+      // ssh failures get the same hint as the status bar; step errors pass through
+      error = explain(errText(e), errText(e))
       try { usb = await api.usb('status') } catch { /* keep the last status */ }
     } finally {
       busy = ''
@@ -72,6 +77,8 @@
           <p class="msg row"><span class="spin" aria-hidden="true"></span>{t('Checking USB…', 'Revisando USB…')}</p>
         {:else if !usb.supported}
           <p class="msg">{usb.reason}</p>
+        {:else if unplugged(usb)}
+          <p class="msg">{t('The cable was unplugged. Disconnecting…', 'Se desconectó el cable. Desconectando…')}</p>
         {:else if usb.state === 'connected'}
           <p class="msg ok">{t('Connected. This computer can see the Kindle\'s files over the cable.', 'Conectada. Esta computadora ve los archivos de la Kindle por el cable.')}</p>
         {:else if usb.state === 'busy'}
@@ -84,7 +91,7 @@
       </div>
       <div class="row">
         {#if error && !busy}
-          <button class="btn ghost" onclick={() => act(last)}>{t('Retry', 'Reintentar')}</button>
+          <button class="btn ghost" onclick={() => (last === 'reset' ? reset() : act(last))}>{t('Retry', 'Reintentar')}</button>
           <button class="btn ghost" onclick={reset}>{t('Reset…', 'Reiniciar…')}</button>
         {:else if usb?.supported && (usb.state !== 'idle' || busy === 'disconnect')}
           {#if usb.state === 'connected' && usb.client}

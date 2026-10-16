@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, errText, type SshInfo } from '../api'
-  import { app, changeLang, explain, refreshStatus } from '../store.svelte'
+  import { app, changeLang, explain, refreshStatus, saveSettings } from '../store.svelte'
   import { i18n, t } from '../i18n.svelte'
 
   let { shortcut }: { shortcut: string } = $props()
@@ -55,6 +55,8 @@
     setTimeout(() => (copied = false), 1500)
   }
   const keyReady = $derived(!!info?.public_key)
+  const mac = navigator.userAgent.includes('Mac')
+  const clients = $derived([{ id: '', label: t('Auto', 'Automática') }, ...['KindleMTP', 'OpenMTP', 'Android File Transfer'].map((id) => ({ id, label: id }))])
 </script>
 
 <div class="stack">
@@ -73,6 +75,16 @@
         <button role="radio" aria-checked={i18n.lang === 'es'} onclick={() => changeLang('es')}>Español</button>
       </div>
     </div>
+    {#if mac}
+      <div class="item">
+        <div class="grow"><div>{t('MTP app', 'App MTP')}</div><div class="sub">{t('Opens after Files → Cable → Connect. Auto picks the first one installed in Applications.', 'Se abre después de Archivos → Cable → Conectar. Automática elige la primera instalada en Aplicaciones.')}</div></div>
+        <div class="seg" role="radiogroup" aria-label={t('MTP app', 'App MTP')}>
+          {#each clients as c (c.id)}
+            <button role="radio" aria-checked={(app.settings?.mtp_client ?? '') === c.id} onclick={() => saveSettings({ mtp_client: c.id })}>{c.label}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 
   <div>

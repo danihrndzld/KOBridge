@@ -11,7 +11,7 @@ export const app = $state({
 })
 
 /** Turn ssh's stderr into a next step; keep the raw text for details. */
-export function explain(raw: string) {
+export function explain(raw: string, fallback?: string) {
   const mac = navigator.userAgent.includes('Mac')
   if (/resolve hostname kindle/i.test(raw))
     return t('~/.ssh/config has no kindle entry yet. Open Settings to set up the connection.', '~/.ssh/config todavía no tiene la entrada kindle. Abrí Configuración para preparar la conexión.')
@@ -21,7 +21,7 @@ export function explain(raw: string) {
   if (/timed out/i.test(raw)) return t('The Kindle didn\'t answer in time. Its Wi-Fi may be asleep, so tap the screen and try again.', 'La Kindle no respondió a tiempo. Puede que su Wi-Fi esté dormido: tocá la pantalla y reintentá.')
   if (/Connection refused/i.test(raw)) return t('The Kindle is on the network, but the KOReader SSH server is off.', 'La Kindle está en la red pero el servidor SSH de KOReader está apagado.')
   if (/Permission denied/i.test(raw)) return t('The Kindle rejected the SSH key.', 'La Kindle rechazó la llave SSH.')
-  return t('Couldn\'t connect to the Kindle.', 'No pude conectar con la Kindle.')
+  return fallback ?? t('Couldn\'t connect to the Kindle.', 'No pude conectar con la Kindle.')
 }
 
 export async function refreshStatus() {
