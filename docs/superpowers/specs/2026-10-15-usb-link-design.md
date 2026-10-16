@@ -37,8 +37,10 @@ Every command is one `ssh::run_script` call (script on stdin, under dropbear's 9
 | `usb_disconnect()` | `stopMtp 1`; `mtp.sh udc disable`; remove the marker | `UsbStatus` |
 | `usb_reset()` | `restart mtp`, then disconnect | `UsbStatus` |
 
-- The wait in `usb_connect` runs on the device inside the script (a `while` loop with `sleep 1`, 20 iterations), so it is one ssh call, not 20.
-- `cable`: `/sys/class/udc/11211000.usb/state` is not `not attached`.
+- The wait in `usb_connect` runs on the device inside the script (a loop polling every 250 ms for up to 20 s), so it is one ssh call. Host detection, destination and marker follow the plugin design verbatim: syslog line `handled state_change_event [12] event [2] current mtp state` after the recorded line count; `--dest=com.lab126.mtp` with the `:1.N` scan as fallback; marker `/tmp/kindlemtp.active` with `owner=kobridge`.
+- `usb_connect` refuses when a valid marker has `owner=plugin`; `usb_disconnect` always tears down.
+- `cable`: `lipc-get-prop com.lab126.powerd isCharging`, labeled "charger or computer". The UDC state file is unreliable while no gadget is bound.
+- The recipe is duplicated here, not called from the plugin: it is six commands plus one grep, the plugin is optional, and a device-resident script would add version skew KOBridge can't pin. Fixture files and the rule text are copied from the plugin repo; if the recipe grows, the plugin ships `kindlemtp.sh` and KOBridge vendors it with a hash test.
 - Probe (same checks as the plugin): `/usr/bin/mtp.sh`, the configfs `mtpgadget`, `pidof tizen-mtp`, `/usr/bin/dbus-send`, `lipc-get-prop -eiq com.lab126.mtp isMtpStarted`, and `volumd` in state `T` (`/proc/<pid>/stat`). A running `volumd` means the stock flow already handles USB: the panel says so and the button is hidden.
 - Book open: KOBridge can't see KOReader's UI state. The panel warns "Close the book on the Kindle first", and if `kindlemtp.koplugin` is installed (`/mnt/us/koreader/plugins/kindlemtp.koplugin`), suggests starting from the Kindle instead, where the plugin enforces it.
 - Errors use `tr(en, es)` and name the failing step.
