@@ -1,5 +1,6 @@
 mod anki;
 mod aria;
+mod files;
 mod highlights;
 mod lua;
 mod obsidian;
@@ -40,6 +41,8 @@ struct Settings {
     ai_model: String,
     /// UI language, "en" or "es"
     lang: String,
+    /// Files view shows KOReader's `.sdr` folders
+    show_sdr: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +56,7 @@ impl Default for Settings {
             last_target: None,
             ai_model: "sonnet".into(),
             lang: "en".into(),
+            show_sdr: false,
         }
     }
 }
@@ -762,6 +766,7 @@ pub fn run() {
             read_remote, write_remote, rename_remote, delete_remote,
             log_start, log_stop, screen_message,
             store_catalog, store_installed, store_install, store_uninstall,
+            files::fs_list, files::fs_snapshot, files::fs_rename, files::fs_move, files::fs_delete, files::fs_mkdir, files::fs_upload, files::fs_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running KOBridge");
@@ -939,6 +944,93 @@ mod live {
             assert!(after.contains("## Resumen"));
             assert_eq!(quotes(&after), before, "quotes and block ids untouched");
             assert!(after.find("## Resumen") < after.find("## Capítulo 1"));
+        });
+    }
+
+    /// Files view against `/mnt/us/kob test/`: `cargo test kindle_files -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn kindle_files() {
+        use files::*;
+        tauri::async_runtime::block_on(async {
+            let root = "/mnt/us/kob test";
+            let clean = format!("rm -rf {}", sq(root));
+            probe().await.expect("status");
+            ssh::run(&clean).await.unwrap();
+            let states = |c: &Change| c.results.iter().map(|o| o.state.as_str()).collect::<Vec<_>>().join(" ");
+            assert_eq!(states(&fs_mkdir(root.into()).await.unwrap()), "OK");
+            assert_eq!(states(&fs_mkdir(root.into()).await.unwrap()), "EXISTS");
+            let a = format!("{root}/a");
+            fs_mkdir(a.clone()).await.unwrap();
+
+            // upload a file and a folder (names with spaces, parens, a quote and an accent)
+            let dir = std::env::temp_dir().join("kob-live-files");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("Carpeta (1) d'Ana/sub")).unwrap();
+            std::fs::write(dir.join("Carpeta (1) d'Ana/sub/ñ.txt"), b"x").unwrap();
+            // over 100 bytes: tar needs a pax or GNU long-name header that BusyBox must read
+            let long = format!("{}.txt", "n".repeat(116));
+            std::fs::write(dir.join("Carpeta (1) d'Ana/sub").join(&long), b"y").unwrap();
+            std::fs::write(dir.join("Libro (1).epub"), b"hola").unwrap();
+            let up = |n: &str| fs_upload(dir.join(n).to_string_lossy().into(), root.into());
+            assert_eq!(states(&up("Libro (1).epub").await.unwrap()), "OK");
+            assert_eq!(states(&up("Libro (1).epub").await.unwrap()), "EXISTS");
+            let c = up("Carpeta (1) d'Ana").await.unwrap();
+            assert!(c.dirs[root].iter().any(|e| e.name == "Carpeta (1) d'Ana" && e.kind == "dir"));
+            let sub = fs_list(format!("{root}/Carpeta (1) d'Ana/sub")).await.unwrap();
+            let mut names: Vec<_> = sub.iter().map(|e| e.name.clone()).collect();
+            names.sort();
+            assert_eq!(names, [long.clone(), "ñ.txt".into()]);
+
+            // rename carries the sidecar; a sidecar shared with another format stays
+            let book = format!("{root}/Libro (1).epub");
+            ssh::run(&format!("mkdir {s} && echo 1 > {s}/metadata.epub.lua", s = sq(&format!("{root}/Libro (1).sdr")))).await.unwrap();
+            let b = format!("{root}/B.epub");
+            assert_eq!(states(&fs_rename(book.clone(), b.clone()).await.unwrap()), "OK");
+            assert!(fs_list(root.into()).await.unwrap().iter().any(|e| e.name == "B.sdr"));
+            ssh::run(&format!("echo 1 > {}", sq(&format!("{root}/B.sdr/metadata.pdf.lua")))).await.unwrap();
+            let c = fs_rename(b.clone(), format!("{root}/C.epub")).await.unwrap();
+            assert_eq!(states(&c), "OK KEPT");
+            assert!(c.dirs[root].iter().any(|e| e.name == "B.sdr"));
+            ssh::run(&format!("rm {}", sq(&format!("{root}/B.sdr/metadata.pdf.lua")))).await.unwrap();
+            fs_rename(format!("{root}/B.sdr"), format!("{root}/C.sdr")).await.unwrap();
+
+            // move both the book and its selected sidecar: the .sdr goes once, with the book
+            let c = fs_move(vec![format!("{root}/C.epub"), format!("{root}/C.sdr")], a.clone()).await.unwrap();
+            assert_eq!(states(&c), "OK");
+            let names: Vec<_> = c.dirs[a.as_str()].iter().map(|e| e.name.clone()).collect();
+            assert!(names.contains(&"C.epub".into()) && names.contains(&"C.sdr".into()), "{names:?}");
+
+            // never overwrite
+            std::fs::write(dir.join("C.epub"), b"otro").unwrap();
+            up("C.epub").await.unwrap();
+            assert_eq!(states(&fs_move(vec![format!("{root}/C.epub")], a.clone()).await.unwrap()), "EXISTS");
+            assert_eq!(ssh::run(&format!("cat {}", sq(&format!("{a}/C.epub")))).await.unwrap(), "hola");
+
+            // download a file and a folder
+            let dest = dir.join("down.epub");
+            assert_eq!(fs_download(format!("{a}/C.epub"), dest.to_string_lossy().into()).await.unwrap(), 4);
+            let tar = dir.join("down.tar");
+            fs_download(format!("{root}/Carpeta (1) d'Ana"), tar.to_string_lossy().into()).await.unwrap();
+            let listing = std::process::Command::new("tar").arg("-tf").arg(&tar).output().unwrap();
+            assert!(String::from_utf8_lossy(&listing.stdout).contains("sub/ñ.txt"));
+
+            // delete purges only that format's metadata, then the empty sidecar
+            let c = fs_delete(vec![format!("{a}/C.epub")]).await.unwrap();
+            assert_eq!(states(&c), "OK");
+            assert!(c.dirs[a.as_str()].is_empty(), "{:?}", c.dirs[a.as_str()]);
+
+            // guards
+            assert!(fs_delete(vec!["/mnt/us/documents".into()]).await.is_err());
+            assert!(fs_rename("/mnt/us/koreader/reader.lua".into(), "/mnt/us/koreader/r.lua".into()).await.is_err());
+            assert!(fs_mkdir(format!("{root}/../x")).await.is_err());
+
+            let c = fs_delete(vec![root.into()]).await.unwrap();
+            assert_eq!(states(&c), "OK");
+            assert!(!c.dirs["/mnt/us"].iter().any(|e| e.name == "kob test"));
+            ssh::run(&clean).await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            println!("files ok");
         });
     }
 

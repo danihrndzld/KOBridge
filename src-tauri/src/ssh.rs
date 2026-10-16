@@ -133,6 +133,21 @@ pub async fn run_with_input(cmd: &str, input: &[u8]) -> Res<()> {
     Ok(())
 }
 
+/// Run a script fed to the remote `sh` on stdin, for scripts that grow with a selection:
+/// dropbear refuses exec requests longer than 9000 bytes.
+pub async fn run_script(script: &str) -> Res<String> {
+    let mut child = ssh().arg("sh").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
+    drop(stdin);
+    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(fail(&out.stderr, out.status.code()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Stream remote stdout into a local file, reporting bytes written.
 pub async fn pull_to_file(cmd: &str, dest: &Path, mut progress: impl FnMut(u64)) -> Res<u64> {
     let mut child = ssh().arg(cmd).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -179,6 +194,30 @@ pub async fn upload(local: &Path, remote_dir: &str) -> Res<String> {
         return Err(fail(&out.stderr, out.status.code()));
     }
     Ok(target)
+}
+
+/// Copy one local folder into a remote directory: local tar piped into remote tar.
+/// COPYFILE_DISABLE keeps macOS from adding `._` files.
+pub async fn upload_dir(local: &Path, remote_dir: &str) -> Res<String> {
+    let name = local.file_name().and_then(|n| n.to_str()).ok_or(tr("invalid folder name", "nombre de carpeta inválido"))?;
+    let parent = local.parent().ok_or(tr("invalid folder name", "nombre de carpeta inválido"))?;
+    let mut tar = Command::new("tar").env("COPYFILE_DISABLE", "1")
+        .args(["-cf", "-", "--exclude", ".DS_Store", "-C"]).arg(parent).arg(name)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true)
+        .spawn().map_err(|e| e.to_string())?;
+    let pipe: Stdio = tar.stdout.take().unwrap().try_into().map_err(|e: std::io::Error| e.to_string())?;
+    let cmd = format!("mkdir -p {d} && tar -xof - -C {d}", d = sq(remote_dir));
+    let out = ssh().arg(cmd).stdin(pipe).stdout(Stdio::null()).stderr(Stdio::piped())
+        .output().await.map_err(|e| e.to_string())?;
+    let local_out = tar.wait_with_output().await.map_err(|e| e.to_string())?;
+    // ssh first: when it fails, tar's own error is only the broken pipe
+    if !out.status.success() {
+        return Err(fail(&out.stderr, out.status.code()));
+    }
+    if !local_out.status.success() {
+        return Err(String::from_utf8_lossy(&local_out.stderr).trim().to_string());
+    }
+    Ok(format!("{}/{}", remote_dir.trim_end_matches('/'), name))
 }
 
 /// Spawn a long-running remote command; caller reads its stdout.

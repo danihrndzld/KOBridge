@@ -13,6 +13,7 @@
   import Fonts from './lib/views/Fonts.svelte'
   import Prefs from './lib/views/Prefs.svelte'
   import Store from './lib/views/Store.svelte'
+  import Files from './lib/views/Files.svelte'
 
   // Lucide paths, inlined
   const views = $derived([
@@ -20,6 +21,7 @@
     { id: 'stats', label: t('Reading', 'Lectura'), icon: 'M3 3v18h18M7 16v-4M12 16V8M17 16v-7', C: Stats },
     { id: 'hl', label: t('Highlights', 'Subrayados'), icon: 'm9 11-6 6v3h9l3-3M22 12l-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4', C: Highlights },
     { id: 'send', label: t('Send books', 'Enviar libros'), icon: 'M4 19.5V5a2 2 0 0 1 2-2h14v18H6.5a2.5 2.5 0 0 1 0-5H20M12 7v6M9 10l3-3 3 3', C: Send },
+    { id: 'files', label: t('Files', 'Archivos'), icon: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z', C: Files },
     { id: 'patch', label: 'Patches', icon: 'm16 18 6-6-6-6M8 6l-6 6 6 6', C: Patches },
     { id: 'store', label: t('Store', 'Tienda'), icon: 'M3 9l1.5-5h15L21 9M3 9h18M3 9v11h18V9M9 20v-6h6v6', C: Store },
     { id: 'cfg', label: t('KOReader files', 'Archivos KOReader'), icon: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6', C: Config },

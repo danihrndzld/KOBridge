@@ -4,7 +4,7 @@ import { i18n, dec, type Lang } from './i18n.svelte'
 export const KO = '/mnt/us/koreader'
 
 export type Status = { host: string; battery: number | null; free_kb: number; total_kb: number; reader_running: boolean }
-export type Settings = { backup_dir: string; vault_dir: string; backup_books: boolean; auto_backup: boolean; last_auto_backup: string; ai_model: Model; lang: Lang }
+export type Settings = { backup_dir: string; vault_dir: string; backup_books: boolean; auto_backup: boolean; last_auto_backup: string; ai_model: Model; lang: Lang; show_sdr: boolean }
 export type BackupFile = { name: string; path: string; size: number; modified: number }
 export type BackupSize = { books_bytes: number; books_files: number; base_bytes: number; full_bytes: number; bytes_per_sec: number }
 export type Day = { date: string; minutes: number }
@@ -24,6 +24,9 @@ export type Catalog = { generated_at: string; offline: string | null; plugins: S
 export type Owned = { kind: StoreKind; id: string; version: string; update: boolean; removable: boolean }
 export type StoreState = { items: Owned[]; registry_error: string | null }
 export type StoreStep = { step: 'backup' | 'download' | 'send' | 'done'; done: number; total: number }
+export type FsEntry = { name: string; kind: 'dir' | 'file' | 'link'; size: number; mtime: number }
+export type FsOutcome = { state: 'OK' | 'EXISTS' | 'ERR' | 'KEPT'; path: string }
+export type FsChange = { results: FsOutcome[]; dirs: Record<string, FsEntry[]> }
 export type SshInfo = { key_path: string; public_key: string | null; config_path: string; has_host: boolean; hostname: string; port: string; user: string; identity: string; usb: string | null }
 
 export const api = {
@@ -82,6 +85,14 @@ export const api = {
     progress.onmessage = onStep
     return invoke<void>(`store_${op}`, { kind, id, stamp, progress })
   },
+  fsList: (dir: string) => invoke<FsEntry[]>('fs_list', { dir }),
+  fsSnapshot: (refresh: boolean) => invoke<Record<string, FsEntry[]>>('fs_snapshot', { refresh }),
+  fsRename: (from: string, to: string) => invoke<FsChange>('fs_rename', { from, to }),
+  fsMove: (paths: string[], dir: string) => invoke<FsChange>('fs_move', { paths, dir }),
+  fsDelete: (paths: string[]) => invoke<FsChange>('fs_delete', { paths }),
+  fsMkdir: (path: string) => invoke<FsChange>('fs_mkdir', { path }),
+  fsUpload: (path: string, dir: string) => invoke<FsChange>('fs_upload', { path, dir }),
+  fsDownload: (path: string, dest: string) => invoke<number>('fs_download', { path, dest }),
 }
 
 export const fmtBytes = (n: number) =>
