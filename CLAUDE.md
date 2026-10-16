@@ -63,6 +63,11 @@ Extend that allowlist rather than bypassing it. The Files view is the one except
 - **`settings.reader.lua` writes.** KOReader overwrites this file on exit, so `write_remote` refuses it while `reader.lua` is running. The check is server side, not just in the UI.
 - **No remote restart.** KOReader cannot be restarted from outside: `koreader.sh` only relaunches on an internal exit code 85. The UI tells the user to restart it instead.
 - **SSH server lifetime.** The dropbear SSH server survives a KOReader exit.
+- **Exec length.** dropbear rejects an exec request over 9,000 bytes (`MAX_CMD_LEN`), so any command that grows with a selection goes through `ssh::run_script` (script on stdin to `sh`).
+- **Storage layers.** `/mnt/us` is the `fsp` FUSE layer over the ext4 image `/dev/loop/0` mounted at `/mnt/base-us`. It is case-sensitive and has no symlinks. A file written to `/mnt/base-us` (MTP writes there) appears in `/mnt/us` at once; a delete can still list for ~1 s.
+- **BusyBox quirks.** `sleep` takes integers only (`sleep 0.5` fails); use `usleep`. `find` has no `-printf`; `mv` has `-T` and `-n`.
+- **Wi-Fi sleeps.** KOReader turns Wi-Fi off when the Kindle sleeps, so `ssh kindle` fails with "Could not resolve hostname" (every `Match` probe fails). Live tests need the Kindle awake; a wait-for-ssh loop beats retrying by hand.
+- **macOS and MTP.** macOS's `ptpcamerad` claims an MTP device as soon as it appears, and libmtp clients then fail with `libusb_claim_interface() = -3` until it is killed or the app grabs the device first.
 
 **Obsidian export (`obsidian.rs`).**
 - Each highlight ends with an Obsidian block id `^kob-xxxxxxxx`, an FNV-1a hash of `datetime` and `text`. Never change the hash: re-export uses these ids to append only new highlights, so a changed id duplicates every quote. `block_id_is_stable` pins one value.
