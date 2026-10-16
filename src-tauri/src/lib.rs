@@ -775,7 +775,8 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running KOBridge")
-        .run(|_, event| if let tauri::RunEvent::ExitRequested { .. } = event { usb::release_on_exit() });
+        // Exit, not ExitRequested: macOS Quit (Cmd-Q) goes through applicationWillTerminate and only sends Exit
+        .run(|_, event| if let tauri::RunEvent::Exit = event { usb::release_on_exit() });
 }
 
 #[cfg(test)]

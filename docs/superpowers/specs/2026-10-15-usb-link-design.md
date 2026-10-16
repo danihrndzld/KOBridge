@@ -33,8 +33,8 @@ Every command is one `ssh::run_script` call (script on stdin, under dropbear's 9
 | Command | Does | Returns |
 |---|---|---|
 | `usb_status()` | Probe (below) plus current state: UDC file, `isMtpStarted`, `/sys/class/udc/*/state`, marker `/tmp/kindlemtp.active` | `UsbStatus { supported, reason, cable, state }` |
-| `usb_connect()` | Probe; reset; `startMtp 1`; wait up to 20 s on the device for the host to configure (rule from the plugin design's "Host detection"); look up `tizen-mtp`'s bus name; unicast drive-mode signal; write the marker | `UsbStatus` |
-| `usb_disconnect()` | `stopMtp 1`; `mtp.sh udc disable`; remove the marker | `UsbStatus` |
+| `usb_connect()` | Probe; refuse another owner's valid marker and no power; look up `tizen-mtp`'s bus name; claim the marker (`set -C`, the lock, before touching the responder); save `preventScreenSaver` to `/tmp/kindlemtp.pss` and set it to 1; reset; record the syslog line count; `startMtp 1`; wait up to 20 s on the device for the host to configure (rule from the plugin design's "Host detection"); unicast drive-mode signal. A lost claim (`marker_failed`) sends no device command and tears nothing down; any failure after the claim tears down | `UsbStatus` |
+| `usb_disconnect()` | `stopMtp 1`; `mtp.sh udc disable`; restore `preventScreenSaver` from `/tmp/kindlemtp.pss`; remove the marker | `UsbStatus` |
 | `usb_reset()` | `restart mtp`, then disconnect | `UsbStatus` |
 
 - The wait in `usb_connect` runs on the device inside the script (a loop polling every 250 ms for up to 20 s), so it is one ssh call. Host detection, destination and marker follow the plugin design verbatim: syslog line `handled state_change_event [12] event [2] current mtp state` after the recorded line count; `--dest=com.lab126.mtp` with the `:1.N` scan as fallback; marker `/tmp/kindlemtp.active` with `owner=kobridge`.
@@ -60,7 +60,8 @@ Every command is one `ssh::run_script` call (script on stdin, under dropbear's 9
 
 - Panel states: Unsupported (reason) · No cable · Ready (Connect) · Connecting… (spinner, up to 20 s) · Connected (Disconnect, "Open <client>") · Error (text, Retry, Reset).
 - Polls `usb_status` every 5 s only while the Files view is visible and the panel isn't idle-unsupported.
-- On app quit (`tauri::RunEvent::ExitRequested`): if the marker says KOBridge started MTP, run `usb_disconnect` (best effort, 3 s cap).
+- On app quit (`tauri::RunEvent::Exit`, which fires for both Cmd-Q, where macOS goes through `applicationWillTerminate` and never sends `ExitRequested`, and the last window closing): if the marker says KOBridge started MTP, run `usb_disconnect` (best effort, 3 s cap, once).
+- Cable pulled: when a status shows our session with no power and the UDC state isn't `configured`, the panel disconnects.
 - After Disconnect, the Files view refreshes the current folder.
 
 ## Testing

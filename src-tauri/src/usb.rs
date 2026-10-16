@@ -17,6 +17,7 @@ DBUS=/usr/bin/dbus-send
 GADGET=/sys/kernel/config/usb_gadget/mtpgadget
 LOG=/var/log/messages
 MARKER=/tmp/kindlemtp.active
+PSS=/tmp/kindlemtp.pss
 PLUGIN=/mnt/us/koreader/plugins/kindlemtp.koplugin
 UDCS=/sys/class/udc
 PROC=/proc
@@ -62,7 +63,12 @@ teardown() {
   lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
   # stopMtp from state 3 does not unbind the UDC
   "$MTP_SH" udc disable >/dev/null 2>&1
+  if [ -f "$PSS" ]; then
+    lipc-set-prop -i com.lab126.powerd preventScreenSaver "$(cat "$PSS")" >/dev/null 2>&1
+    rm -f "$PSS"
+  fi
   rm -f "$MARKER"
+  facts
 }
 busname() {
   l=$("$DBUS" --system --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null) || return 0
@@ -75,8 +81,9 @@ busname() {
   done
 }
 waithost() {
-  end=$(( $(date +%s) + WAIT )); seen=
+  end=$(( $(date +%s) + WAIT )); seen=; i=0
   while :; do
+    i=$(( i + 1 ))
     n=$(wc -l < "$LOG" 2>/dev/null | tr -d ' ')
     if [ -z "$base" ]; then base=$n
     elif [ -n "$n" ] && [ "$n" -lt "$base" ]; then base=0
@@ -84,7 +91,8 @@ waithost() {
     tail -n +$(( ${base:-0} + 1 )) "$LOG" 2>/dev/null | grep -qF "$STATE2" && return 0
     # secondary hint: the responder unbinds the gadget at state 2
     if [ -n "$(cat "$GADGET/UDC" 2>/dev/null)" ]; then seen=1
-    elif [ -n "$seen" ] && [ "$(get com.lab126.mtp isMtpStarted)" = 1 ]; then return 0
+    # a lipc read can block for 10 s, so about once a second
+    elif [ -n "$seen" ] && [ $(( i % 4 )) = 0 ] && [ "$(get com.lab126.mtp isMtpStarted)" = 1 ]; then return 0
     fi
     [ "$(date +%s)" -ge "$end" ] && return 1
     usleep 250000 2>/dev/null || sleep 1
@@ -92,8 +100,8 @@ waithost() {
 }
 "#;
 
-/// Start, as `start()` + `poll()` in the plugin: refusals, bus name, reset, startMtp, marker,
-/// wait for the host, then the unicast drive-mode signal. Any failure after that tears down.
+/// Start, as `start()` + `poll()` in the plugin: refusals, bus name, claim the marker, keep-awake,
+/// reset, startMtp, wait for the host, then the unicast drive-mode signal. A failure after the claim tears down.
 const CONNECT: &str = r#"err=
 if [ -n "$(reason)" ]; then :
 elif [ -n "$m" ] && [ "$s" = 1 ]; then
@@ -107,16 +115,24 @@ else
   dest=$(busname)
   if [ -z "$dest" ]; then err=bus_name_not_found
   else
-    "$MTP_SH" udc disable >/dev/null 2>&1
-    lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
-    base=$(wc -l < "$LOG" 2>/dev/null | tr -d ' ')
-    if ! lipc-set-prop -i com.lab126.mtp startMtp 1 >/dev/null 2>&1; then err=startmtp_failed
-    elif ! (set -C; printf 'owner=kobridge pid=%s since=%s\n' $$ "$(date +%s)" > "$MARKER") 2>/dev/null; then err=marker_failed
-    elif ! waithost; then err=no_host
-    elif ! "$DBUS" --system --dest="$dest" --type=signal /default com.lab126.volumd.driveModeStateChanged int32:1 >/dev/null 2>&1; then err=signal_failed
+    # the marker is the lock: claim it before touching the responder
+    if ! (set -C; printf 'owner=kobridge pid=%s since=%s\n' $$ "$(date +%s)" > "$MARKER") 2>/dev/null; then err=marker_failed
+    else
+      # keep the Kindle awake during the transfer; teardown restores the saved value
+      k=$(get com.lab126.powerd preventScreenSaver)
+      echo "${k:-0}" > "$PSS"
+      lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1
+      "$MTP_SH" udc disable >/dev/null 2>&1
+      lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
+      base=$(wc -l < "$LOG" 2>/dev/null | tr -d ' ')
+      if ! lipc-set-prop -i com.lab126.mtp startMtp 1 >/dev/null 2>&1; then err=startmtp_failed
+      elif ! waithost; then err=no_host
+      elif ! "$DBUS" --system --dest="$dest" --type=signal /default com.lab126.volumd.driveModeStateChanged int32:1 >/dev/null 2>&1; then err=signal_failed
+      fi
     fi
   fi
-  [ -n "$err" ] && teardown
+  # a lost claim (marker_failed) touched nothing; after the claim every failure tears down
+  case "$err" in startmtp_failed|no_host|signal_failed) teardown ;; *) facts ;; esac
 fi"#;
 
 const STATUS: &str = "err=";
@@ -126,9 +142,10 @@ const RESET: &str = "err=; restart mtp >/dev/null 2>&1 || err=restart_failed; te
 /// On quit: only a session KOBridge started.
 const RELEASE: &str = "err=; case \"$m\" in owner=kobridge\\ *) teardown ;; esac";
 
+/// `facts` runs once, and again only after the body changed something (teardown, connect).
 /// The body runs inside a group fed /dev/null, so no command can eat the rest of the script from stdin.
 fn script(body: &str) -> String {
-    format!("{PATHS}{LIB}{{\nfacts\n{body}\nfacts\nst\necho \"error=$err\"\n}} </dev/null\nexit 0\n")
+    format!("{PATHS}{LIB}{{\nfacts\n{body}\nst\necho \"error=$err\"\n}} </dev/null\nexit 0\n")
 }
 
 #[derive(Serialize, Debug, PartialEq, Default)]
@@ -144,6 +161,8 @@ pub struct UsbStatus {
     /// kindlemtp.koplugin is installed
     pub plugin: bool,
     pub udc: String,
+    /// `/sys/class/udc/*/state`: `configured` while a computer holds the link
+    pub udc_state: String,
     /// computer-side app opened after connect, None when none is installed
     pub client: Option<String>,
 }
@@ -204,12 +223,16 @@ fn parse(out: &str) -> Res<UsbStatus> {
         state: state.into(),
         plugin: get("plugin") == "1",
         udc: get("udc").into(),
+        udc_state: get("udc_state").into(),
         client: None,
     })
 }
 
-async fn run(body: &str) -> Res<UsbStatus> {
-    let s = parse(&ssh::run_script(&script(body)).await?)?;
+/// `step` names the command in the timeout error.
+async fn run(body: &str, step: &str) -> Res<UsbStatus> {
+    let out = tokio::time::timeout(std::time::Duration::from_secs(60), ssh::run_script(&script(body))).await
+        .map_err(|_| tr(format!("{step}: the Kindle didn't answer within 60 s. Try Reset."), format!("{step}: la Kindle no respondió en 60 s. Probá Reiniciar.")))??;
+    let s = parse(&out)?;
     OURS.store(s.state == "connected", Relaxed);
     Ok(s)
 }
@@ -220,9 +243,12 @@ fn client(app: &AppHandle) -> Option<(String, String)> {
         return Some((tr("file manager", "administrador de archivos"), "mtp://".into()));
     }
     let choice = super::get_settings(app.clone()).mtp_client;
-    let home = super::home().join("Developer/KindleMTP/KindleMTP.app").to_string_lossy().into_owned();
-    let auto = ["/Applications/KindleMTP.app", &home, "/Applications/OpenMTP.app", "/Applications/Android File Transfer.app"];
-    let path = if choice.is_empty() { auto.iter().find(|p| std::path::Path::new(p).exists())?.to_string() } else { choice };
+    let path = if choice.is_empty() {
+        let dirs = [std::path::PathBuf::from("/Applications"), super::home().join("Applications")];
+        ["KindleMTP", "OpenMTP", "Android File Transfer"].iter()
+            .flat_map(|a| dirs.iter().map(move |d| d.join(format!("{a}.app"))))
+            .find(|p| p.exists())?.to_string_lossy().into_owned()
+    } else { choice }; // an app name; `open -a` finds it wherever it is
     let label = std::path::Path::new(&path).file_stem()?.to_string_lossy().into_owned();
     Some((label, path))
 }
@@ -234,26 +260,26 @@ fn with_client(app: &AppHandle, mut s: UsbStatus) -> UsbStatus {
 
 #[tauri::command]
 pub async fn usb_status(app: AppHandle) -> Res<UsbStatus> {
-    Ok(with_client(&app, run(STATUS).await?))
+    Ok(with_client(&app, run(STATUS, "usb_status").await?))
 }
 
 /// Connects, then opens the MTP client.
 #[tauri::command]
 pub async fn usb_connect(app: AppHandle) -> Res<UsbStatus> {
-    let s = with_client(&app, run(CONNECT).await?);
+    let s = with_client(&app, run(CONNECT, "usb_connect").await?);
     if s.state == "connected" { let _ = usb_open(app); }
     Ok(s)
 }
 
 #[tauri::command]
 pub async fn usb_disconnect(app: AppHandle) -> Res<UsbStatus> {
-    Ok(with_client(&app, run(DISCONNECT).await?))
+    Ok(with_client(&app, run(DISCONNECT, "usb_disconnect").await?))
 }
 
 /// Restarts a wedged responder, then disconnects.
 #[tauri::command]
 pub async fn usb_reset(app: AppHandle) -> Res<UsbStatus> {
-    Ok(with_client(&app, run(RESET).await?))
+    Ok(with_client(&app, run(RESET, "usb_reset").await?))
 }
 
 #[tauri::command]
@@ -264,7 +290,7 @@ pub fn usb_open(app: AppHandle) -> Res<()> {
 
 /// On quit: tear down only a session KOBridge started, capped at 3 s.
 pub fn release_on_exit() {
-    if !OURS.load(Relaxed) { return }
+    if !OURS.swap(false, Relaxed) { return }
     let (tx, rx) = std::sync::mpsc::channel();
     tauri::async_runtime::spawn(async move { let _ = tx.send(ssh::run_script(&script(RELEASE)).await); });
     let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
@@ -360,7 +386,8 @@ mod tests {
                 d.put(p, &format!("#!/bin/sh\n{body}\n"));
                 Command::new("chmod").args(["+x"]).arg(d.0.join(p)).status().unwrap();
             };
-            exe("bin/lipc-get-prop", r#"[ -f "$T/lipc_$3" ] && cat "$T/lipc_$3" || exit 1"#);
+            exe("bin/lipc-get-prop", r#"echo "$3" >> "$T/gets"
+[ -f "$T/lipc_$3" ] && cat "$T/lipc_$3" || exit 1"#);
             exe("bin/lipc-set-prop", r#"echo "lipc $3 $4" >> "$T/calls"
 [ -f "$T/refuse_$3" ] && exit 1
 case $3 in
@@ -368,6 +395,7 @@ case $3 in
     [ -f "$T/rotate" ] && : > "$T/messages"
     [ -f "$T/host" ] && cat "$T/host" >> "$T/messages" ;;
   stopMtp) echo 0 > "$T/lipc_isMtpStarted" ;;
+  preventScreenSaver) echo "$4" > "$T/lipc_preventScreenSaver" ;;
 esac
 exit 0"#);
             exe("bin/pidof", r#"[ -f "$T/pid_$1" ] && cat "$T/pid_$1" || exit 1"#);
@@ -376,7 +404,7 @@ exit 0"#);
             exe("mtp.sh", r#"echo "mtp.sh $*" >> "$T/calls""#);
             exe("dbus-send", r#"for a; do n=$a; done
 case "$*" in
-  *ListNames*) cat "$T/listnames" ;;
+  *ListNames*) cat "$T/listnames"; if [ -f "$T/race" ]; then cp "$T/race" "$T/marker"; echo 1 > "$T/lipc_isMtpStarted"; fi ;;
   *GetConnectionUnixProcessID*) n=${n#string:}; if [ -f "$T/getpid_$n" ]; then cat "$T/getpid_$n"; else cat "$T/getpid_err" >&2; exit 1; fi ;;
   *) echo "dbus $*" >> "$T/calls" ;;
 esac"#);
@@ -389,6 +417,7 @@ esac"#);
             d.put("proc/2187/stat", STAT_T);
             d.put("lipc_isMtpStarted", "0\n");
             d.put("lipc_isCharging", "1\n");
+            d.put("lipc_preventScreenSaver", "0\n");
             d.put("listnames", LIST_WITH);
             d.put("getpid_err", PID_ERR);
             d
@@ -402,7 +431,7 @@ esac"#);
                 Some(("WAIT", _)) => "WAIT=1".to_string(),
                 Some((k, _)) => format!("{k}=\"$T/{}\"", match k {
                     "MTP_SH" => "mtp.sh", "DBUS" => "dbus-send", "GADGET" => "gadget", "LOG" => "messages",
-                    "MARKER" => "marker", "PLUGIN" => "plugin", "UDCS" => "udc", _ => "proc",
+                    "MARKER" => "marker", "PSS" => "pss", "PLUGIN" => "plugin", "UDCS" => "udc", _ => "proc",
                 }),
                 None => l.into(),
             }).collect::<Vec<_>>().join("\n");
@@ -425,6 +454,10 @@ esac"#);
         let d = Dev::new("probe");
         let s = d.run(STATUS).unwrap();
         assert!(s.supported && s.cable && !s.plugin, "{s:?}");
+        // lipc reads can block for 10 s each: a status reads each property once
+        assert_eq!(d.read("gets"), "isMtpStarted\nisCharging\n");
+        d.run(RELEASE).unwrap();
+        assert_eq!(d.read("gets").lines().count(), 4);
         assert_eq!((s.state.as_str(), s.code.as_str()), ("idle", ""));
         // each check fails on its own, in the plugin's order
         type Break = fn(&Dev);
@@ -490,8 +523,8 @@ esac"#);
         d.put("host", LOG_HOST);
         let s = d.run(CONNECT).unwrap();
         assert_eq!(s.state, "connected");
-        assert_eq!(steps(&d), ["mtp.sh udc disable", "lipc stopMtp 1", "lipc startMtp 1", "dbus --system --dest=com.lab126.mtp --type=signal"]);
-        assert!(d.calls()[3].ends_with("com.lab126.volumd.driveModeStateChanged int32:1"));
+        assert_eq!(steps(&d), ["lipc preventScreenSaver 1", "mtp.sh udc disable", "lipc stopMtp 1", "lipc startMtp 1", "dbus --system --dest=com.lab126.mtp --type=signal"]);
+        assert!(d.calls()[4].ends_with("com.lab126.volumd.driveModeStateChanged int32:1"));
         let m = d.read("marker");
         assert!(owner(m.trim()) == Some("kobridge"), "{m}");
         // a second connect while ours is valid does nothing
@@ -524,7 +557,7 @@ esac"#);
         d.put("listnames", LIST_WITHOUT);
         d.put("host", LOG_HOST);
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("bus_name_not_found"));
-        assert_eq!(steps(&d), ["lipc stopMtp 1", "mtp.sh udc disable"]);
+        assert!(d.calls().is_empty());
     }
 
     #[test]
@@ -534,8 +567,9 @@ esac"#);
         let d = Dev::new("charger");
         d.put("gadget/UDC", &last(TAPE_CHARGER));
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("no_host"));
-        assert_eq!(steps(&d), ["mtp.sh udc disable", "lipc stopMtp 1", "lipc startMtp 1", "lipc stopMtp 1", "mtp.sh udc disable"]);
-        assert!(!d.0.join("marker").exists());
+        assert_eq!(steps(&d), ["lipc preventScreenSaver 1", "mtp.sh udc disable", "lipc stopMtp 1", "lipc startMtp 1",
+                               "lipc stopMtp 1", "mtp.sh udc disable", "lipc preventScreenSaver 0"]);
+        assert!(!d.0.join("marker").exists() && !d.0.join("pss").exists());
         assert_eq!(last(TAPE_HOST), "11211000.usb");
 
         let d = Dev::new("nopower");
@@ -554,7 +588,38 @@ esac"#);
         let d = Dev::new("refuse");
         d.put("refuse_startMtp", "");
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("startmtp_failed"));
-        assert_eq!(steps(&d)[3..], ["lipc stopMtp 1", "mtp.sh udc disable"]);
+        assert_eq!(steps(&d)[4..], ["lipc stopMtp 1", "mtp.sh udc disable", "lipc preventScreenSaver 0"]);
+        assert!(!d.0.join("marker").exists());
+
+        // lost the set -C claim to the plugin: no lipc or mtp.sh command, its session stays up
+        let d = Dev::new("race");
+        d.put("race", "owner=plugin pid=9 since=1760557063\n");
+        assert_eq!(d.run(CONNECT).unwrap_err(), step_error("marker_failed"));
+        assert!(d.calls().is_empty(), "{:?}", d.calls());
+        assert_eq!(d.read("marker"), "owner=plugin pid=9 since=1760557063\n");
+    }
+
+    #[test]
+    fn keeps_the_kindle_awake_and_restores() {
+        let d = Dev::new("pss");
+        d.put("lipc_preventScreenSaver", "1\n"); // a KeepAlive user
+        d.put("host", LOG_HOST);
+        d.run(CONNECT).unwrap();
+        assert_eq!(d.read("pss").trim(), "1");
+        d.put("lipc_preventScreenSaver", "0\n");
+        d.run(CONNECT).unwrap(); // already ours: the saved value stays
+        assert_eq!(d.read("pss").trim(), "1");
+        d.run(DISCONNECT).unwrap();
+        assert_eq!(d.read("lipc_preventScreenSaver").trim(), "1");
+        assert!(!d.0.join("pss").exists());
+        // an unreadable value restores 0
+        let d = Dev::new("pss0");
+        d.rm("lipc_preventScreenSaver");
+        d.put("host", LOG_HOST);
+        d.run(CONNECT).unwrap();
+        assert_eq!(d.read("pss").trim(), "0");
+        d.run(DISCONNECT).unwrap();
+        assert_eq!(d.calls().last().unwrap(), "lipc preventScreenSaver 0");
     }
 
     #[test]
@@ -592,13 +657,13 @@ mod live {
     #[ignore]
     fn kindle_usb() {
         tauri::async_runtime::block_on(async {
-            let s = run(STATUS).await.expect("status");
+            let s = run(STATUS, "usb_status").await.expect("status");
             println!("{s:?}");
             assert!(s.supported && s.cable, "{s:?}");
-            let s = run(CONNECT).await.expect("connect");
+            let s = run(CONNECT, "usb_connect").await.expect("connect");
             assert_eq!(s.state, "connected");
             assert_eq!(ssh::run("echo ok").await.expect("ssh after drive mode").trim(), "ok");
-            let s = run(DISCONNECT).await.expect("disconnect");
+            let s = run(DISCONNECT, "usb_disconnect").await.expect("disconnect");
             assert_eq!((s.state.as_str(), s.udc.as_str()), ("idle", ""));
         });
     }
