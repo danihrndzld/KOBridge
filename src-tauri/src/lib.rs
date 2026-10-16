@@ -8,6 +8,7 @@ mod setup;
 mod ssh;
 mod stats;
 mod store;
+mod usb;
 
 use serde::{Deserialize, Serialize};
 use ssh::{sq, tr, Res};
@@ -43,6 +44,8 @@ struct Settings {
     lang: String,
     /// Files view shows KOReader's `.sdr` folders
     show_sdr: bool,
+    /// MTP app opened after a USB connect (macOS); empty picks the first installed one
+    mtp_client: String,
 }
 
 impl Default for Settings {
@@ -57,6 +60,7 @@ impl Default for Settings {
             ai_model: "sonnet".into(),
             lang: "en".into(),
             show_sdr: false,
+            mtp_client: String::new(),
         }
     }
 }
@@ -767,9 +771,11 @@ pub fn run() {
             log_start, log_stop, screen_message,
             store_catalog, store_installed, store_install, store_uninstall,
             files::fs_list, files::fs_snapshot, files::fs_rename, files::fs_move, files::fs_delete, files::fs_mkdir, files::fs_upload, files::fs_download,
+            usb::usb_status, usb::usb_connect, usb::usb_disconnect, usb::usb_reset, usb::usb_open,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running KOBridge");
+        .build(tauri::generate_context!())
+        .expect("error while running KOBridge")
+        .run(|_, event| if let tauri::RunEvent::ExitRequested { .. } = event { usb::release_on_exit() });
 }
 
 #[cfg(test)]
