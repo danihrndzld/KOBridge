@@ -34,8 +34,12 @@ pstate() { sed -n 's/^[0-9][0-9]* (.*) \([A-Za-z]\) .*$/\1/p'; }
 facts() {
   s=$(get com.lab126.mtp isMtpStarted)
   m=$(cat "$MARKER" 2>/dev/null)
-  # a marker is valid only while isMtpStarted reads 1; an explicit 0 makes it stale, a failed read keeps it
-  if [ -n "$m" ] && [ "$s" = 0 ]; then rm -f "$MARKER"; m=; fi
+  # stale only when isMtpStarted reads an explicit 0 AND since is 30 s old or more by the Kindle's clock;
+  # a failed read, a fresh claim (before its startMtp), an unparsable or a future since all keep it
+  if [ -n "$m" ] && [ "$s" = 0 ]; then
+    t0=$(echo "$m" | sed -n 's/^owner=[^ ][^ ]* pid=[0-9][0-9]* since=\([0-9][0-9]*\)$/\1/p')
+    if [ -n "$t0" ] && [ $(( $(date +%s) - t0 )) -ge 30 ]; then rm -f "$MARKER"; m=; fi
+  fi
   r=$(pidof tizen-mtp | first)
   v=$(pidof volumd | first); vs=
   [ -n "$v" ] && vs=$({ pstate < "$PROC/$v/stat"; } 2>/dev/null)
@@ -104,7 +108,7 @@ waithost() {
 /// reset, startMtp, wait for the host, then the unicast drive-mode signal. A failure after the claim tears down.
 const CONNECT: &str = r#"err=
 if [ -n "$(reason)" ]; then :
-elif [ -n "$m" ] && [ "$s" = 1 ]; then
+elif [ -n "$m" ]; then
   case "$m" in
     owner=kobridge\ *) ;;
     owner=plugin\ *) err=owner_plugin ;;
@@ -210,10 +214,12 @@ fn parse(out: &str) -> Res<UsbStatus> {
     if !get("error").is_empty() { return Err(step_error(get("error"))) }
     let code = get("reason");
     let marker = get("marker");
+    // facts already dropped stale markers, so any marker left is valid or a fresh claim
     let state = match (marker.is_empty(), get("started") == "1", owner(marker)) {
+        (true, ..) => "idle",
         (false, true, Some("kobridge")) => "connected",
-        (false, true, _) => "busy",
-        _ => "idle",
+        (false, false, Some("kobridge")) => "idle",
+        _ => "busy",
     };
     Ok(UsbStatus {
         supported: code.is_empty(),
@@ -401,6 +407,8 @@ exit 0"#);
             exe("bin/pidof", r#"[ -f "$T/pid_$1" ] && cat "$T/pid_$1" || exit 1"#);
             exe("bin/restart", r#"echo "restart $*" >> "$T/calls""#);
             exe("bin/usleep", "sleep 0.05");
+            // the Kindle's clock, fixed when `now` exists
+            exe("bin/date", r#"if [ "$1" = +%s ] && [ -f "$T/now" ]; then cat "$T/now"; else /bin/date "$@"; fi"#);
             exe("mtp.sh", r#"echo "mtp.sh $*" >> "$T/calls""#);
             exe("dbus-send", r#"for a; do n=$a; done
 case "$*" in
@@ -507,6 +515,24 @@ esac"#);
         d.put("marker", "owner=plugin pid=9 since=1760557063\n");
         assert_eq!(d.run(STATUS).unwrap().state, "idle");
         assert!(!d.0.join("marker").exists());
+        // the 30 s boundary by the Kindle's clock; unparsable and future since count as fresh
+        d.put("now", "1760557100\n");
+        for (since, kept) in [("1760557071", true), ("1760557070", false), ("1760557200", true)] {
+            d.put("marker", &format!("owner=plugin pid=9 since={since}\n"));
+            let s = d.run(STATUS).unwrap();
+            assert_eq!(d.0.join("marker").exists(), kept, "since={since}");
+            assert_eq!(s.state, if kept { "busy" } else { "idle" }, "since={since}");
+        }
+        for m in ["junk\n", "owner=plugin pid=9 since=\n", "owner=plugin pid=9 since=12x\n"] {
+            d.put("marker", m);
+            d.run(STATUS).unwrap();
+            assert!(d.0.join("marker").exists(), "{m:?}");
+        }
+        // connect refuses a fresh claim even before its startMtp
+        d.put("marker", "owner=plugin pid=9 since=1760557090\n");
+        assert_eq!(d.run(CONNECT).unwrap_err(), step_error("owner_plugin"));
+        assert!(d.calls().is_empty());
+        d.rm("now");
         // a failed lipc read keeps it
         d.rm("lipc_isMtpStarted");
         d.put("marker", "owner=plugin pid=9 since=1760557063\n");
