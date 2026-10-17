@@ -46,7 +46,7 @@ Every command is one `ssh::run_script` call (script on stdin, under dropbear's 9
 - Book open: KOBridge can't see KOReader's UI state. The panel warns "Close the book on the Kindle first", and if `kindlemtp.koplugin` is installed (`/mnt/us/koreader/plugins/kindlemtp.koplugin`), suggests starting from the Kindle instead, where the plugin enforces it.
 - Errors use `tr(en, es)` and name the failing step.
 - Safety rules (from reverse-engineering stock `volumd`/`fsp`, same as the plugin): MTP writes through the Kindle's own ext4 driver, so the risks are application-level. `fsp` reopens paths on every read, so KOReader sees files replaced under it: connect refuses with `book_open` when any fd of `luajit`/`reader.lua` points under `/mnt/us` outside `koreader/` or into `koreader/cache/cr3cache/`. `tizen-mtp` never fsyncs, so teardown runs `sync` after `stopMtp 1` and `udc disable`. Interrupted transfers leave `/mnt/base-us/.mtp-tmp`, removed after teardown when `isMtpStarted` reads 0 and no valid marker remains.
-- Cable: `isCharging` 1, or any `/sys/class/udc/*/state` other than `not attached`, or any `/sys/class/power_supply/*/online` reading 1 (a full battery reads `isCharging` 0 with the cable in).
+- Cable: `isCharging` 1, or any `/sys/class/udc/*/state` other than `not attached`, or a `/sys/class/power_supply/*` entry whose `type` is `Mains` or starts with `USB` (except `USB_WET`) reading `online` 1 (a full battery reads `isCharging` 0 with the cable in). Battery, Wireless and `USB_WET` entries are skipped: on the Paperwhite, unplugged, `bd71827_bat` (Battery) and `max20342_moisture` (USB_WET) read `online` 1.
 - Wi-Fi: the unicast signal keeps Wi-Fi up, so the SSH session that started MTP can also stop it.
 
 ## Computer side

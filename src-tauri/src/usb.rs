@@ -47,10 +47,16 @@ facts() {
   [ -n "$v" ] && vs=$({ pstate < "$PROC/$v/stat"; } 2>/dev/null)
   c=$(get com.lab126.powerd isCharging)
   # isCharging alone reads 0 on a full battery with the cable in: any UDC state other than
-  # "not attached" or a power supply online also counts as a cable (charger or computer)
+  # "not attached" or an external supply online also counts as a cable (charger or computer).
+  # Only Mains and USB* supplies: the battery and USB_WET (moisture) always read online=1.
   cab=; [ "$c" = 1 ] && cab=1
   for f in "$UDCS"/*/state; do [ -f "$f" ] && [ "$(cat "$f")" != "not attached" ] && cab=1; done
-  for f in "$POWER"/*/online; do [ "$(cat "$f" 2>/dev/null)" = 1 ] && cab=1; done
+  for d in "$POWER"/*; do
+    case "$(cat "$d/type" 2>/dev/null)" in
+      USB_WET) ;;
+      Mains|USB*) [ "$(cat "$d/online" 2>/dev/null)" = 1 ] && cab=1 ;;
+    esac
+  done
 }
 # Prints y when KOReader holds a file open under /mnt/us outside koreader/, or in cr3cache:
 # a book is open, and KOReader would rewrite its sidecar over changes made from the computer.
@@ -345,6 +351,11 @@ mod tests {
     const LOG_HOST: &str = include_str!("fixtures/usb/syslog_state2.txt");
     const LOG_NONE: &str = include_str!("fixtures/usb/syslog_no_state2.txt");
     const TAPE_HOST: &str = include_str!("fixtures/usb/udc_tape_host.txt");
+    /// /sys/class/power_supply on the device with the cable unplugged: (name, type, online)
+    const POWER_SUPPLY: [(&str, &str, &str); 4] = [
+        ("bd71827_bat", "Battery", "1"), ("max20342_moisture", "USB_WET", "1"),
+        ("bd71827_ac", "Mains", "0"), ("Wireless", "Wireless", "0"),
+    ];
     const TAPE_CHARGER: &str = include_str!("fixtures/usb/udc_tape_charger.txt");
 
     /// Runs one LIB helper locally (macOS sh + BSD sed here, busybox on the device) with `input` on stdin.
@@ -662,11 +673,25 @@ esac"#);
         d.put("udc/11211000.usb/state", "powered\n");
         assert!(d.run(STATUS).unwrap().cable);
         d.put("udc/11211000.usb/state", "not attached\n");
-        std::fs::create_dir_all(d.0.join("power/usb")).unwrap();
-        d.put("power/usb/online", "0\n");
+        // the real unplugged snapshot (Paperwhite, battery Discharging): the battery and the
+        // moisture sensor read online=1 and must not count
+        for (name, kind, online) in POWER_SUPPLY {
+            std::fs::create_dir_all(d.0.join(format!("power/{name}"))).unwrap();
+            d.put(&format!("power/{name}/type"), &format!("{kind}\n"));
+            d.put(&format!("power/{name}/online"), &format!("{online}\n"));
+        }
         assert!(!d.run(STATUS).unwrap().cable);
-        d.put("power/usb/online", "1\n");
+        let s = d.run(CONNECT).unwrap_err();
+        assert_eq!(s, step_error("no_power"));
+        d.put("power/bd71827_ac/online", "1\n");
         assert!(d.run(STATUS).unwrap().cable);
+        for kind in ["USB", "USB_DCP", "USB_C", "USB_PD"] {
+            d.put("power/bd71827_ac/type", &format!("{kind}\n"));
+            assert!(d.run(STATUS).unwrap().cable, "{kind}");
+        }
+        d.put("power/bd71827_ac/type", "Wireless\n");
+        assert!(!d.run(STATUS).unwrap().cable);
+        d.put("power/bd71827_ac/type", "Mains\n");
         d.put("host", LOG_HOST);
         assert_eq!(d.run(CONNECT).unwrap().state, "connected");
     }
