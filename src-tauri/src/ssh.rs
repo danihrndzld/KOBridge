@@ -54,12 +54,13 @@ pub async fn resolve() -> Res<Option<Vec<String>>> {
 fn parse_g(text: &str) -> Res<Option<Vec<String>>> {
     let mut args: Vec<String> = Vec::new();
     let mut host = String::new();
+    let mut port = String::from("22");
     let mut alias = false;
     for line in text.lines() {
         let Some((k, v)) = line.split_once(' ') else { continue };
         match k {
             "hostname" => host = v.to_string(),
-            "port" => args.extend(["-p".into(), v.into()]),
+            "port" => { port = v.to_string(); args.extend(["-p".into(), v.into()]) }
             "user" => args.extend(["-l".into(), v.into()]),
             "identityfile" => args.extend(["-i".into(), v.into()]),
             "identitiesonly" | "userknownhostsfile" | "addkeystoagent" => args.extend(["-o".into(), format!("{k}={v}")]),
@@ -73,8 +74,10 @@ fn parse_g(text: &str) -> Res<Option<Vec<String>>> {
         return Err(unreachable()); // every Match probe failed
     }
     if !alias {
-        // keep the known_hosts entry the alias would have used
-        args.extend(["-o".into(), format!("HostKeyAlias={host}")]);
+        // keep the known_hosts entry the alias would have used: ssh names it
+        // `[host]:port` off port 22, and HostKeyAlias is looked up literally
+        let key = if port == "22" { host.clone() } else { format!("[{host}]:{port}") };
+        args.extend(["-o".into(), format!("HostKeyAlias={key}")]);
     }
     // UseKeychain only exists in Apple's ssh; Linux ssh rejects the whole command
     if cfg!(target_os = "macos") { args.extend(["-o".into(), "UseKeychain=yes".into()]); }
@@ -242,6 +245,9 @@ mod tests {
         // no alias in config: pin known_hosts to the IP the alias would have used
         let t = parse_g("hostname 10.0.0.5\nport 22\n").unwrap().unwrap();
         assert!(t.iter().any(|x| x == "HostKeyAlias=10.0.0.5"));
+        // off port 22 ssh saved the key as [ip]:port (the block Settings writes uses 2222)
+        let t = parse_g("hostname 192.168.0.111\nport 2222\n").unwrap().unwrap();
+        assert!(t.iter().any(|x| x == "HostKeyAlias=[192.168.0.111]:2222"));
         // every Match probe failed
         assert_eq!(parse_g("hostname kindle\nport 2222\n").unwrap_err(), unreachable());
         // proxied hosts keep the alias
