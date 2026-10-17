@@ -1,7 +1,7 @@
 {
   "name": "kobridge",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2"
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-process": "2",
+    "@tauri-apps/plugin-updater": "2"
   }
 }

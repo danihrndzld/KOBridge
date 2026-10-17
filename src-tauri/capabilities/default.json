@@ -11,6 +11,8 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-ask",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

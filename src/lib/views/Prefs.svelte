@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, errText, type SshInfo } from '../api'
-  import { app, changeLang, explain, refreshStatus, saveSettings } from '../store.svelte'
+  import { app, changeLang, explain, refreshStatus, saveSettings, updater, checkUpdate, installUpdate, updateLabel } from '../store.svelte'
+  import { getVersion } from '@tauri-apps/api/app'
   import { i18n, t } from '../i18n.svelte'
 
   let { shortcut }: { shortcut: string } = $props()
@@ -13,8 +14,9 @@
   let port = $state(2222)
   let copied = $state(false)
 
+  let version = $state('')
   const load = async () => (info = await api.sshSetupInfo())
-  onMount(load)
+  onMount(() => { load(); getVersion().then((v) => (version = v)) })
 
   async function act(name: string, f: () => Promise<string | void>) {
     busy = name
@@ -74,6 +76,22 @@
         <button role="radio" aria-checked={i18n.lang === 'en'} onclick={() => changeLang('en')}>English</button>
         <button role="radio" aria-checked={i18n.lang === 'es'} onclick={() => changeLang('es')}>Español</button>
       </div>
+    </div>
+    <div class="item">
+      <div class="grow">
+        <div>{t('Version', 'Versión')} <span class="num">{version}</span></div>
+        <div class="sub">
+          {#if updater.error}<span class="selectable bad-text">{updater.error}</span>
+          {:else if updater.available}{t(`Version ${updater.available.version} is available. The app restarts after the update.`, `La versión ${updater.available.version} está disponible. La app se reinicia después de actualizar.`)}
+          {:else if updater.checked}{t('This is the latest version.', 'Es la última versión.')}
+          {:else}{t('The app checks GitHub for a new version at launch.', 'La app busca una versión nueva en GitHub al abrir.')}{/if}
+        </div>
+      </div>
+      {#if updater.available}
+        <button class="btn" disabled={updater.busy || app.backup.busy} onclick={installUpdate}>{updateLabel()}</button>
+      {:else}
+        <button class="btn ghost" disabled={updater.checking} onclick={() => checkUpdate(true)}>{updater.checking ? t('Checking…', 'Buscando…') : t('Check for updates', 'Buscar actualizaciones')}</button>
+      {/if}
     </div>
     {#if mac}
       <div class="item">
@@ -174,4 +192,5 @@
   .acts { display: flex; gap: 8px; align-items: center; flex: none }
   .port { flex: 0 0 90px !important }
   .link:disabled { opacity: .45 }
+  .bad-text { color: var(--bad) }
 </style>

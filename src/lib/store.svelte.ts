@@ -1,5 +1,8 @@
 import { api, errText, today, type BackupFile, type Settings, type Status } from './api'
 import { i18n, t } from './i18n.svelte'
+import { check, type Update } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { ask } from '@tauri-apps/plugin-dialog'
 
 export const app = $state({
   status: null as Status | null,
@@ -67,7 +70,8 @@ const stamp = () => {
 }
 
 export async function runBackup() {
-  if (app.backup.busy || !app.status) return
+  // a backup started during an update download would be killed by the relaunch
+  if (app.backup.busy || updater.busy || !app.status) return
   app.backup = { ...app.backup, busy: true, bytes: 0, error: '' }
   try {
     app.backup.last = await api.backupRun(stamp(), (n) => (app.backup.bytes = n))
@@ -85,4 +89,62 @@ export async function maybeAutoBackup() {
   // one attempt per day; a failed run shows its error and waits for a manual retry
   await saveSettings({ last_auto_backup: today() })
   await runBackup()
+}
+
+/** App updates from the GitHub release's latest.json, signed with the key in tauri.conf.json. */
+export const updater = $state({
+  available: null as Update | null,
+  checking: false,
+  checked: false,
+  busy: false,
+  got: 0,
+  total: 0,
+  error: '',
+})
+
+/** The launch check stays quiet; only a manual check shows its error. */
+export async function checkUpdate(manual = false) {
+  if (updater.checking || updater.busy) return
+  updater.checking = true
+  updater.error = ''
+  try {
+    updater.available = await check()
+    updater.checked = true
+  } catch (e) {
+    if (manual) updater.error = errText(e)
+  } finally {
+    updater.checking = false
+  }
+}
+
+export async function installUpdate() {
+  const u = updater.available
+  if (!u || updater.busy || app.backup.busy) return
+  const ok = await ask(
+    t('KOBridge restarts after the update. Uploads, file changes and Claude jobs that are still running will stop.', 'KOBridge se reinicia después de actualizar. Las subidas, los cambios de archivos y los trabajos de Claude que sigan corriendo se van a detener.'),
+    { title: t(`Update to ${u.version}?`, `¿Actualizar a ${u.version}?`), okLabel: t('Update', 'Actualizar'), cancelLabel: t('Cancel', 'Cancelar') },
+  )
+  if (!ok) return
+  updater.busy = true
+  updater.error = ''
+  updater.got = 0
+  updater.total = 0
+  try {
+    await u.downloadAndInstall((ev) => {
+      if (ev.event === 'Started') updater.total = ev.data.contentLength ?? 0
+      else if (ev.event === 'Progress') updater.got += ev.data.chunkLength
+    })
+    // relaunch exits through RunEvent::Exit, which releases a USB session
+    await relaunch()
+  } catch (e) {
+    updater.error = errText(e)
+  } finally {
+    updater.busy = false
+  }
+}
+
+export const updateLabel = () => {
+  const v = updater.available?.version ?? ''
+  if (!updater.busy) return t(`Update to ${v}`, `Actualizar a ${v}`)
+  return updater.total ? t(`Downloading ${Math.round((updater.got / updater.total) * 100)} %`, `Descargando ${Math.round((updater.got / updater.total) * 100)} %`) : t('Downloading…', 'Descargando…')
 }

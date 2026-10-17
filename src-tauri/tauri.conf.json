@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "KOBridge",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "com.danisnowman.kobridge",
   "build": {
     "frontendDist": "../dist",
@@ -48,6 +48,15 @@
     ],
     "resources": {
       "binaries/aria2-COPYING": "licenses/aria2-COPYING"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGRTEwN0MzMkYwNjUxNkYKUldSdlVRWXZ3d2Zobi80c2JOSm5vd3N1NEVIS0tBL05CUlBudnpQdG1sZWxQT2EvK0RKa2Vvb2QK",
+      "endpoints": [
+        "https://github.com/danihrndzld/KOBridge/releases/latest/download/latest.json"
+      ]
     }
   }
 }

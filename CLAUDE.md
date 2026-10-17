@@ -10,6 +10,7 @@ KOBridge is a macOS and Linux app (Tauri 2 + Svelte 5 + Vite, Rust backend) that
 bun install
 bunx tauri dev                          # app with HMR; Rust changes rebuild automatically
 bunx tauri build                        # .app + .dmg in src-tauri/target/release/bundle/
+                                        # needs TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/kobridge.key)" (updater artifacts)
 bunx tauri build --bundles app          # .app only (faster)
 bun run check                           # svelte-check + tsc; must stay at 0 errors / 0 warnings
 
@@ -107,6 +108,7 @@ Extend that allowlist rather than bypassing it. The Files view is the one except
 ## Release / install
 
 - **Local Network permission.** `src-tauri/Info.plist` adds `NSLocalNetworkUsageDescription`. Without it, macOS may silently block the ssh child from reaching the LAN when the app is launched from Finder, even though the same command works from Terminal.
+- **App updates.** `tauri-plugin-updater` reads `latest.json` from the latest GitHub release (`plugins.updater` in `tauri.conf.json`) and checks each download against the public key there. The private key is `~/.tauri/kobridge.key` (no password) and the repo secret `TAURI_SIGNING_PRIVATE_KEY`; losing it means users can't update in place, so keep a copy. A macOS release: build with `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/kobridge.key)" bunx tauri build`, which also writes `bundle/macos/KOBridge.app.tar.gz` and its `.sig`; upload the `.dmg`, the `.app.tar.gz` and a `latest.json` with the `darwin-aarch64-app` entry. `linux.yml` then adds `linux-x86_64-appimage` and `linux-x86_64-deb` to that `latest.json`, so `latest.json` must be on the release before it is published (`gh release create` with the files does that), and a later hand upload of `latest.json` drops the Linux entries. The launch check in `store.svelte.ts` stays quiet on errors; Settings shows them.
 - **Installing.** Copy `src-tauri/target/release/bundle/macos/KOBridge.app` over `/Applications/KOBridge.app`.
 - **Icon.** Source is `assets/icon.svg`; regenerate with `rsvg-convert -w 1024 -h 1024 assets/icon.svg -o assets/icon.png && bunx tauri icon assets/icon.png`, then delete `src-tauri/icons/{android,ios}`.
 

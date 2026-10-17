@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { getCurrentWindow } from '@tauri-apps/api/window'
-  import { app, refreshStatus, loadSettings, maybeAutoBackup } from './lib/store.svelte'
+  import { app, refreshStatus, loadSettings, maybeAutoBackup, updater, checkUpdate, installUpdate, updateLabel } from './lib/store.svelte'
   import { t, dec } from './lib/i18n.svelte'
   import Backup from './lib/views/Backup.svelte'
   import Stats from './lib/views/Stats.svelte'
@@ -46,6 +46,7 @@
     // the window starts hidden (tauri.conf.json) so it never flashes an unstyled frame
     getCurrentWindow().show()
     loadSettings().then(check)
+    checkUpdate()
     const t = setInterval(check, 30_000)
     return () => clearInterval(t)
   })
@@ -84,6 +85,10 @@
           <code class="selectable">{app.offlineReason}</code>
         </details>
         <button class="btn ghost retry" onclick={check}>{t('Retry', 'Reintentar')}</button>
+      {/if}
+      {#if updater.available}
+        <button class="btn upd" disabled={updater.busy || app.backup.busy} title={app.backup.busy ? t('Wait for the backup to finish', 'Esperá a que termine el respaldo') : ''} onclick={installUpdate}>{updateLabel()}</button>
+        {#if updater.error}<span class="selectable upd-err">{updater.error}</span>{/if}
       {/if}
       <button class="nav prefs" aria-current={current === 'prefs'} onclick={() => open('prefs')}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
@@ -127,6 +132,8 @@
   summary { cursor: pointer }
   details code { display: block; margin-top: 4px; font-size: 10.5px; white-space: pre-wrap; word-break: break-word }
   .retry { margin-top: 6px; justify-self: start }
+  .upd { margin-top: 8px; justify-self: stretch }
+  .upd-err { font-size: 11px; color: var(--bad); word-break: break-word }
   .prefs { margin: 8px -8px 0; font-size: 13px }
   kbd { font: 11px var(--sans); color: var(--ink-2) }
   .prefs[aria-current='true'] kbd { color: inherit }
