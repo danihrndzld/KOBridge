@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "KOBridge",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "identifier": "com.danisnowman.kobridge",
   "build": {
     "frontendDist": "../dist",
@@ -49,7 +49,10 @@
     "resources": {
       "binaries/aria2-COPYING": "licenses/aria2-COPYING"
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "KOBridge Self-Signed"
+    }
   },
   "plugins": {
     "updater": {
