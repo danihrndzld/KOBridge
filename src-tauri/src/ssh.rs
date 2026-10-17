@@ -27,6 +27,10 @@ pub fn unreachable() -> String {
     tr("The Kindle doesn't answer on any of its known IPs.", "La Kindle no responde en ninguna de sus IPs conocidas.")
 }
 
+pub fn no_entry() -> String {
+    tr("~/.ssh/config has no kindle entry.", "~/.ssh/config no tiene la entrada kindle.")
+}
+
 /// Explicit ssh args ending with the destination IP, or None to use the `kindle` alias.
 static TARGET: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
@@ -48,7 +52,11 @@ pub fn is_connect_error(msg: &str) -> bool {
 /// Ask ssh which host/port/user/key `kindle` maps to right now (runs the Match probes once).
 pub async fn resolve() -> Res<Option<Vec<String>>> {
     let out = Command::new("/usr/bin/ssh").args(["-G", HOST]).output().await.map_err(|e| e.to_string())?;
-    parse_g(&String::from_utf8_lossy(&out.stdout))
+    parse_g(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+        // an unresolved alias is a dead IP only when the config names kindle at all
+        let config = std::fs::read_to_string(crate::home().join(".ssh/config")).unwrap_or_default();
+        if crate::setup::names_kindle(&config) { e } else { no_entry() }
+    })
 }
 
 fn parse_g(text: &str) -> Res<Option<Vec<String>>> {
