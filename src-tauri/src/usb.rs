@@ -20,6 +20,8 @@ MARKER=/tmp/kindlemtp.active
 PSS=/tmp/kindlemtp.pss
 PLUGIN=/mnt/us/koreader/plugins/kindlemtp.koplugin
 UDCS=/sys/class/udc
+POWER=/sys/class/power_supply
+BASEUS=/mnt/base-us
 PROC=/proc
 WAIT=20
 ";
@@ -44,6 +46,22 @@ facts() {
   v=$(pidof volumd | first); vs=
   [ -n "$v" ] && vs=$({ pstate < "$PROC/$v/stat"; } 2>/dev/null)
   c=$(get com.lab126.powerd isCharging)
+  # isCharging alone reads 0 on a full battery with the cable in: any UDC state other than
+  # "not attached" or a power supply online also counts as a cable (charger or computer)
+  cab=; [ "$c" = 1 ] && cab=1
+  for f in "$UDCS"/*/state; do [ -f "$f" ] && [ "$(cat "$f")" != "not attached" ] && cab=1; done
+  for f in "$POWER"/*/online; do [ "$(cat "$f" 2>/dev/null)" = 1 ] && cab=1; done
+}
+# Prints y when KOReader holds a file open under /mnt/us outside koreader/, or in cr3cache:
+# a book is open, and KOReader would rewrite its sidecar over changes made from the computer.
+bookopen() {
+  for p in $(pidof luajit reader.lua); do ls -l "$PROC/$p/fd" 2>/dev/null | sed -n 's/.* -> //p'; done | while read -r f; do
+    case "$f" in
+      /mnt/us/koreader/cache/cr3cache/*) echo y; break ;;
+      /mnt/us/koreader/*) ;;
+      /mnt/us/*) echo y; break ;;
+    esac
+  done
 }
 reason() {
   if [ ! -e "$MTP_SH" ]; then echo no_mtp_sh
@@ -58,6 +76,7 @@ st() {
   echo "reason=$(reason)"
   echo "started=$s"
   echo "charging=$c"
+  echo "cable=$cab"
   echo "udc=$(cat "$GADGET/UDC" 2>/dev/null)"
   echo "udc_state=$(cat "$UDCS"/*/state 2>/dev/null | head -n 1)"
   echo "marker=$m"
@@ -67,12 +86,16 @@ teardown() {
   lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
   # stopMtp from state 3 does not unbind the UDC
   "$MTP_SH" udc disable >/dev/null 2>&1
+  # tizen-mtp never fsyncs what it wrote
+  sync
   if [ -f "$PSS" ]; then
     lipc-set-prop -i com.lab126.powerd preventScreenSaver "$(cat "$PSS")" >/dev/null 2>&1
     rm -f "$PSS"
   fi
   rm -f "$MARKER"
   facts
+  # what an interrupted transfer left behind, once nobody holds MTP
+  if [ "$s" = 0 ] && [ -z "$m" ]; then rm -rf "$BASEUS/.mtp-tmp"; fi
 }
 busname() {
   l=$("$DBUS" --system --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null) || return 0
@@ -114,7 +137,8 @@ elif [ -n "$m" ]; then
     owner=plugin\ *) err=owner_plugin ;;
     *) err=owner_other ;;
   esac
-elif [ "$c" != 1 ]; then err=no_power
+elif [ "$cab" != 1 ]; then err=no_power
+elif [ -n "$(bookopen)" ]; then err=book_open
 else
   dest=$(busname)
   if [ -z "$dest" ]; then err=bus_name_not_found
@@ -188,6 +212,8 @@ fn step_error(code: &str) -> String {
     match code {
         "owner_plugin" => tr("The KOReader plugin is running a USB transfer. Stop it on the Kindle first.", "El plugin de KOReader está haciendo una transferencia USB. Detenela primero en la Kindle."),
         "owner_other" => tr("Another program started USB transfer on the Kindle. Disconnect it first.", "Otro programa inició la transferencia USB en la Kindle. Desconectala primero."),
+        "book_open" => tr("Close the book on the Kindle first: KOReader rewrites its sidecar and would overwrite changes made from the computer.",
+                          "Cerrá el libro en la Kindle primero: KOReader reescribe su sidecar y pisaría los cambios hechos desde la computadora."),
         "no_power" => tr("The Kindle gets no power over USB. Connect the cable to this computer.", "La Kindle no recibe energía por USB. Conectá el cable a esta computadora."),
         "bus_name_not_found" => tr("Bus name: tizen-mtp has no D-Bus name, so drive mode can't be sent. Try Reset.", "Nombre de bus: tizen-mtp no tiene nombre en D-Bus, así que no se puede enviar el modo unidad. Probá Reiniciar."),
         "startmtp_failed" => tr("startMtp: the Kindle refused to start MTP.", "startMtp: la Kindle se negó a iniciar MTP."),
@@ -225,7 +251,7 @@ fn parse(out: &str) -> Res<UsbStatus> {
         supported: code.is_empty(),
         code: code.into(),
         reason: if code.is_empty() { String::new() } else { probe_reason(code) },
-        cable: get("charging") == "1",
+        cable: get("cable") == "1",
         state: state.into(),
         plugin: get("plugin") == "1",
         udc: get("udc").into(),
@@ -400,11 +426,12 @@ case $3 in
   startMtp) echo 1 > "$T/lipc_isMtpStarted"
     [ -f "$T/rotate" ] && : > "$T/messages"
     [ -f "$T/host" ] && cat "$T/host" >> "$T/messages" ;;
-  stopMtp) echo 0 > "$T/lipc_isMtpStarted" ;;
+  stopMtp) [ -f "$T/sticky" ] || echo 0 > "$T/lipc_isMtpStarted" ;;
   preventScreenSaver) echo "$4" > "$T/lipc_preventScreenSaver" ;;
 esac
 exit 0"#);
-            exe("bin/pidof", r#"[ -f "$T/pid_$1" ] && cat "$T/pid_$1" || exit 1"#);
+            exe("bin/pidof", r#"r=1; for n; do [ -f "$T/pid_$n" ] && cat "$T/pid_$n" && r=0; done; exit $r"#);
+            exe("bin/sync", r#"echo sync >> "$T/calls""#);
             exe("bin/restart", r#"echo "restart $*" >> "$T/calls""#);
             exe("bin/usleep", "sleep 0.05");
             // the Kindle's clock, fixed when `now` exists
@@ -439,7 +466,8 @@ esac"#);
                 Some(("WAIT", _)) => "WAIT=1".to_string(),
                 Some((k, _)) => format!("{k}=\"$T/{}\"", match k {
                     "MTP_SH" => "mtp.sh", "DBUS" => "dbus-send", "GADGET" => "gadget", "LOG" => "messages",
-                    "MARKER" => "marker", "PSS" => "pss", "PLUGIN" => "plugin", "UDCS" => "udc", _ => "proc",
+                    "MARKER" => "marker", "PSS" => "pss", "PLUGIN" => "plugin", "UDCS" => "udc",
+                    "POWER" => "power", "BASEUS" => "base-us", _ => "proc",
                 }),
                 None => l.into(),
             }).collect::<Vec<_>>().join("\n");
@@ -594,7 +622,7 @@ esac"#);
         d.put("gadget/UDC", &last(TAPE_CHARGER));
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("no_host"));
         assert_eq!(steps(&d), ["lipc preventScreenSaver 1", "mtp.sh udc disable", "lipc stopMtp 1", "lipc startMtp 1",
-                               "lipc stopMtp 1", "mtp.sh udc disable", "lipc preventScreenSaver 0"]);
+                               "lipc stopMtp 1", "mtp.sh udc disable", "sync", "lipc preventScreenSaver 0"]);
         assert!(!d.0.join("marker").exists() && !d.0.join("pss").exists());
         assert_eq!(last(TAPE_HOST), "11211000.usb");
 
@@ -614,7 +642,7 @@ esac"#);
         let d = Dev::new("refuse");
         d.put("refuse_startMtp", "");
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("startmtp_failed"));
-        assert_eq!(steps(&d)[4..], ["lipc stopMtp 1", "mtp.sh udc disable", "lipc preventScreenSaver 0"]);
+        assert_eq!(steps(&d)[4..], ["lipc stopMtp 1", "mtp.sh udc disable", "sync", "lipc preventScreenSaver 0"]);
         assert!(!d.0.join("marker").exists());
 
         // lost the set -C claim to the plugin: no lipc or mtp.sh command, its session stays up
@@ -623,6 +651,60 @@ esac"#);
         assert_eq!(d.run(CONNECT).unwrap_err(), step_error("marker_failed"));
         assert!(d.calls().is_empty(), "{:?}", d.calls());
         assert_eq!(d.read("marker"), "owner=plugin pid=9 since=1760557063\n");
+    }
+
+    #[test]
+    fn cable_counts_a_full_battery() {
+        // the Reddit bug: battery Full reads isCharging 0 with the cable still in
+        let d = Dev::new("cable");
+        d.put("lipc_isCharging", "0\n");
+        assert!(!d.run(STATUS).unwrap().cable);
+        d.put("udc/11211000.usb/state", "powered\n");
+        assert!(d.run(STATUS).unwrap().cable);
+        d.put("udc/11211000.usb/state", "not attached\n");
+        std::fs::create_dir_all(d.0.join("power/usb")).unwrap();
+        d.put("power/usb/online", "0\n");
+        assert!(!d.run(STATUS).unwrap().cable);
+        d.put("power/usb/online", "1\n");
+        assert!(d.run(STATUS).unwrap().cable);
+        d.put("host", LOG_HOST);
+        assert_eq!(d.run(CONNECT).unwrap().state, "connected");
+    }
+
+    #[test]
+    fn refuses_with_a_book_open() {
+        let open = |name: &str, pid: &str, targets: &[&str]| {
+            let d = Dev::new(name);
+            d.put(&format!("pid_{}", if pid == "1" { "luajit" } else { "reader.lua" }), &format!("{pid}\n"));
+            let fd = d.0.join(format!("proc/{pid}/fd"));
+            std::fs::create_dir_all(&fd).unwrap();
+            for (i, t) in targets.iter().enumerate() { std::os::unix::fs::symlink(t, fd.join(i.to_string())).unwrap(); }
+            d.put("host", LOG_HOST);
+            let r = d.run(CONNECT);
+            (d, r)
+        };
+        for (pid, t) in [("1", "/mnt/us/books/A b (1).epub"), ("2", "/mnt/us/documents/x.pdf"), ("1", "/mnt/us/koreader/cache/cr3cache/A.cr3")] {
+            let (d, r) = open(&format!("book{pid}{}", t.len()), pid, &["/dev/null", "/mnt/us/koreader/settings.reader.lua", t]);
+            assert_eq!(r.unwrap_err(), step_error("book_open"), "{t}");
+            assert!(d.calls().is_empty());
+        }
+        // KOReader's own files, the file browser and other folders are fine
+        let (_, r) = open("nobook", "1", &["/mnt/us/koreader/settings/statistics.sqlite3", "/mnt/us/koreader/fonts/x.ttf", "/tmp/x", "socket:[123]"]);
+        assert_eq!(r.unwrap().state, "connected");
+    }
+
+    #[test]
+    fn cleans_mtp_tmp_only_when_mtp_is_free() {
+        let d = Dev::new("tmp");
+        std::fs::create_dir_all(d.0.join("base-us/.mtp-tmp/part")).unwrap();
+        d.put("lipc_isMtpStarted", "1\n");
+        d.put("sticky", ""); // stopMtp didn't take: isMtpStarted still reads 1
+        d.run(DISCONNECT).unwrap();
+        assert!(d.0.join("base-us/.mtp-tmp").exists());
+        d.rm("sticky");
+        d.run(DISCONNECT).unwrap();
+        assert!(!d.0.join("base-us/.mtp-tmp").exists());
+        assert!(d.0.join("base-us").exists());
     }
 
     #[test]
@@ -655,12 +737,12 @@ esac"#);
         d.put("marker", "owner=plugin pid=9 since=1760557063\n");
         // stop tears down whoever owns the marker, stopMtp before udc disable
         assert_eq!(d.run(DISCONNECT).unwrap().state, "idle");
-        assert_eq!(steps(&d), ["lipc stopMtp 1", "mtp.sh udc disable"]);
+        assert_eq!(steps(&d), ["lipc stopMtp 1", "mtp.sh udc disable", "sync"]);
         assert!(!d.0.join("marker").exists());
 
         let d = Dev::new("reset");
         assert_eq!(d.run(RESET).unwrap().state, "idle");
-        assert_eq!(steps(&d), ["restart mtp", "lipc stopMtp 1", "mtp.sh udc disable"]);
+        assert_eq!(steps(&d), ["restart mtp", "lipc stopMtp 1", "mtp.sh udc disable", "sync"]);
 
         // quitting releases only KOBridge's own session
         let d = Dev::new("release");
@@ -670,7 +752,7 @@ esac"#);
         assert!(d.calls().is_empty());
         d.put("marker", "owner=kobridge pid=9 since=1760557063\n");
         d.run(RELEASE).unwrap();
-        assert_eq!(steps(&d), ["lipc stopMtp 1", "mtp.sh udc disable"]);
+        assert_eq!(steps(&d), ["lipc stopMtp 1", "mtp.sh udc disable", "sync"]);
     }
 }
 
