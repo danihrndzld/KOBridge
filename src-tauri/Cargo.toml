@@ -1,6 +1,6 @@
 [package]
 name = "kobridge"
-version = "0.6.1"
+version = "0.7.0"
 description = "KOReader on a Kindle, managed over SSH"
 authors = ["Daniel Hernández"]
 license = "PolyForm-Noncommercial-1.0.0"
