@@ -23,6 +23,7 @@ UDCS=/sys/class/udc
 POWER=/sys/class/power_supply
 BASEUS=/mnt/base-us
 PROC=/proc
+IPCF=/tmp/kindlemtp-ipcf
 WAIT=20
 ";
 
@@ -33,10 +34,29 @@ first() { sed -n '1s/^[[:space:]]*\([0-9][0-9]*\).*/\1/p'; }
 names() { sed -n 's/^[[:space:]]*string "\([^"]*\)"[[:space:]]*$/\1/p'; }
 pid_of() { sed -n 's/^[[:space:]]*uint32 \([0-9][0-9]*\)[[:space:]]*$/\1/p' | head -n 1; }
 pstate() { sed -n 's/^[0-9][0-9]* (.*) \([A-Za-z]\) .*$/\1/p'; }
+# Firmware 5.19 on: tizen-mtp registers no lipc properties; $IPCF (kindlemtp.koplugin's ipcf/) calls
+# its IPCF4 service, which sets the same flag and sends the same events as startMtp/stopMtp 1.
+# Its ping prints no_ipcn on older firmware. Nothing reports the state there, so the gadget's
+# UDC binding stands in for isMtpStarted.
+mtp() {
+  if [ -n "$ipcf" ]; then "$IPCF" "$1" >/dev/null 2>&1
+  else lipc-set-prop -i com.lab126.mtp "${1}Mtp" 1 >/dev/null 2>&1
+  fi
+}
+started() {
+  if [ -n "$ipcf" ]; then [ -n "$(cat "$GADGET/UDC" 2>/dev/null)" ] && echo 1 || echo 0
+  else get com.lab126.mtp isMtpStarted
+  fi
+}
 facts() {
-  s=$(get com.lab126.mtp isMtpStarted)
+  if [ -z "$ctl" ]; then
+    # the plugin's copy when it is installed (in case /tmp is noexec), else the one KOBridge uploads
+    [ -x "$PLUGIN/bin/kindlemtp-ipcf" ] && IPCF="$PLUGIN/bin/kindlemtp-ipcf"
+    ctl=lipc; ipcf=; "$IPCF" ping >/dev/null 2>&1 && { ctl=ipcf; ipcf=1; }
+  fi
+  s=$(started)
   m=$(cat "$MARKER" 2>/dev/null)
-  # stale only when isMtpStarted reads an explicit 0 AND since is 30 s old or more by the Kindle's clock;
+  # stale only when started reads an explicit 0 AND since is 30 s old or more by the Kindle's clock;
   # a failed read, a fresh claim (before its startMtp), an unparsable or a future since all keep it
   if [ -n "$m" ] && [ "$s" = 0 ]; then
     t0=$(echo "$m" | sed -n 's/^owner=[^ ][^ ]* pid=[0-9][0-9]* since=\([0-9][0-9]*\)$/\1/p')
@@ -81,6 +101,7 @@ reason() {
 st() {
   echo "reason=$(reason)"
   echo "started=$s"
+  echo "control=$ctl"
   echo "charging=$c"
   echo "cable=$cab"
   echo "udc=$(cat "$GADGET/UDC" 2>/dev/null)"
@@ -89,7 +110,7 @@ st() {
   echo "plugin=$([ -d "$PLUGIN" ] && echo 1)"
 }
 teardown() {
-  lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
+  mtp stop
   # stopMtp from state 3 does not unbind the UDC
   "$MTP_SH" udc disable >/dev/null 2>&1
   # tizen-mtp never fsyncs what it wrote
@@ -125,7 +146,7 @@ waithost() {
     # secondary hint: the responder unbinds the gadget at state 2
     if [ -n "$(cat "$GADGET/UDC" 2>/dev/null)" ]; then seen=1
     # a lipc read can block for 10 s, so about once a second
-    elif [ -n "$seen" ] && [ $(( i % 4 )) = 0 ] && [ "$(get com.lab126.mtp isMtpStarted)" = 1 ]; then return 0
+    elif [ -n "$seen" ] && [ $(( i % 4 )) = 0 ] && [ "$(started)" = 1 ]; then return 0
     fi
     [ "$(date +%s)" -ge "$end" ] && return 1
     usleep 250000 2>/dev/null || sleep 1
@@ -157,11 +178,15 @@ else
       echo "${k:-0}" > "$PSS"
       lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1
       "$MTP_SH" udc disable >/dev/null 2>&1
-      lipc-set-prop -i com.lab126.mtp stopMtp 1 >/dev/null 2>&1
+      mtp stop
       base=$(wc -l < "$LOG" 2>/dev/null | tr -d ' ')
-      if ! lipc-set-prop -i com.lab126.mtp startMtp 1 >/dev/null 2>&1; then err=startmtp_failed
+      if ! mtp start; then err=startmtp_failed
       elif ! waithost; then err=no_host
       elif ! "$DBUS" --system --dest="$dest" --type=signal /default com.lab126.volumd.driveModeStateChanged int32:1 >/dev/null 2>&1; then err=signal_failed
+      elif [ -n "$ipcf" ]; then
+        # 5.19: started is the UDC binding, which the responder restores (state 2 -> 3) a moment
+        # after the signal; read too early, a working connection would report idle
+        j=0; while [ -z "$(cat "$GADGET/UDC" 2>/dev/null)" ] && [ $j -lt 12 ]; do usleep 250000 2>/dev/null || sleep 1; j=$(( j + 1 )); done
       fi
     fi
   fi
@@ -207,7 +232,8 @@ fn probe_reason(code: &str) -> String {
         "no_gadget" => tr("The MTP USB gadget (mtpgadget in configfs) is missing.", "Falta el gadget USB de MTP (mtpgadget en configfs)."),
         "no_responder" => tr("The MTP responder (tizen-mtp) isn't running. Reset it, or restart the Kindle.", "El responder MTP (tizen-mtp) no está corriendo. Reinicialo o reiniciá la Kindle."),
         "no_dbus_send" => tr("/usr/bin/dbus-send is missing.", "Falta /usr/bin/dbus-send."),
-        "no_lipc" => tr("lipc doesn't answer for com.lab126.mtp.", "lipc no responde para com.lab126.mtp."),
+        "no_lipc" => tr("The MTP responder doesn't answer, neither over lipc (com.lab126.mtp) nor over IPCF4 (com.lab126.mtp.service).",
+                        "El responder MTP no contesta, ni por lipc (com.lab126.mtp) ni por IPCF4 (com.lab126.mtp.service)."),
         "volumd_running" => tr("volumd is running, so the Kindle's own USB mode handles the cable. Plug it in and use the Kindle's screen.",
                                "volumd está corriendo, así que el modo USB propio de la Kindle maneja el cable. Conectalo y usá la pantalla de la Kindle."),
         _ => tr(format!("Unsupported: {code}"), format!("No compatible: {code}")),
@@ -266,13 +292,34 @@ fn parse(out: &str) -> Res<UsbStatus> {
     })
 }
 
+/// kindlemtp.koplugin's IPCF4 helper (armhf, built from its `ipcf/kindlemtp-ipcf.c`), for firmware 5.19 on.
+const IPCF_BIN: &[u8] = include_bytes!("../resources/kindlemtp-ipcf");
+/// Set once the helper is in /tmp; a reboot empties /tmp, so a `no_lipc` answer uploads it again.
+static IPCF_UP: AtomicBool = AtomicBool::new(false);
+
+async fn upload_ipcf() {
+    if IPCF_UP.swap(true, Relaxed) { return }
+    // $$: overlapping first runs (status poll and connect) don't write the same temp file
+    let cmd = "p=/tmp/kindlemtp-ipcf.$$ && cat > $p && chmod +x $p && mv $p /tmp/kindlemtp-ipcf";
+    if ssh::run_with_input(cmd, IPCF_BIN).await.is_err() { IPCF_UP.store(false, Relaxed) }
+}
+
 /// `step` names the command in the timeout error.
 async fn run(body: &str, step: &str) -> Res<UsbStatus> {
-    let out = tokio::time::timeout(std::time::Duration::from_secs(60), ssh::run_script(&script(body))).await
-        .map_err(|_| tr(format!("{step}: the Kindle didn't answer within 60 s. Try Reset."), format!("{step}: la Kindle no respondió en 60 s. Probá Reiniciar.")))??;
-    let s = parse(&out)?;
+    upload_ipcf().await;
+    let mut s = run_once(body, step).await?;
+    if s.code == "no_lipc" && IPCF_UP.swap(false, Relaxed) {
+        upload_ipcf().await;
+        s = run_once(body, step).await?;
+    }
     OURS.store(s.state == "connected", Relaxed);
     Ok(s)
+}
+
+async fn run_once(body: &str, step: &str) -> Res<UsbStatus> {
+    let out = tokio::time::timeout(std::time::Duration::from_secs(60), ssh::run_script(&script(body))).await
+        .map_err(|_| tr(format!("{step}: the Kindle didn't answer within 60 s. Try Reset."), format!("{step}: la Kindle no respondió en 60 s. Probá Reiniciar.")))??;
+    parse(&out)
 }
 
 /// (label, what `open` gets). macOS: `Settings.mtp_client`, else the first installed app; Linux: gvfs/kio.
@@ -448,11 +495,23 @@ exit 0"#);
             // the Kindle's clock, fixed when `now` exists
             exe("bin/date", r#"if [ "$1" = +%s ] && [ -f "$T/now" ]; then cat "$T/now"; else /bin/date "$@"; fi"#);
             exe("mtp.sh", r#"echo "mtp.sh $*" >> "$T/calls""#);
+            // the IPCF4 helper: on 5.18 (no `fw519` file) libipcn is missing; on 5.19 start binds the
+            // gadget and the host configures it, stop unbinds it
+            exe("ipcf", r#"[ -f "$T/fw519" ] || { echo no_ipcn; exit 2; }
+[ "$1" = ping ] || echo "ipcf $1" >> "$T/calls"
+[ -f "$T/refuse_ipcf_$1" ] && exit 4
+case $1 in
+  start) [ -f "$T/late_rebind" ] || echo musb-hdrc.1.auto > "$T/gadget/UDC"; [ -f "$T/host" ] && cat "$T/host" >> "$T/messages" ;;
+  stop) [ -f "$T/sticky" ] || : > "$T/gadget/UDC" ;;
+esac
+echo ok"#);
             exe("dbus-send", r#"for a; do n=$a; done
 case "$*" in
   *ListNames*) cat "$T/listnames"; if [ -f "$T/race" ]; then cp "$T/race" "$T/marker"; echo 1 > "$T/lipc_isMtpStarted"; fi ;;
   *GetConnectionUnixProcessID*) n=${n#string:}; if [ -f "$T/getpid_$n" ]; then cat "$T/getpid_$n"; else cat "$T/getpid_err" >&2; exit 1; fi ;;
-  *) echo "dbus $*" >> "$T/calls" ;;
+  *) echo "dbus $*" >> "$T/calls"
+     # 5.19 with late_rebind: the responder rebinds the gadget a moment after the signal
+     [ -f "$T/late_rebind" ] && ( sleep 0.3; echo musb-hdrc.1.auto > "$T/gadget/UDC" ) & ;;
 esac"#);
             // a healthy idle Kindle on a computer's cable, KOReader running (volumd stopped)
             d.put("gadget/UDC", "");
@@ -478,7 +537,7 @@ esac"#);
                 Some((k, _)) => format!("{k}=\"$T/{}\"", match k {
                     "MTP_SH" => "mtp.sh", "DBUS" => "dbus-send", "GADGET" => "gadget", "LOG" => "messages",
                     "MARKER" => "marker", "PSS" => "pss", "PLUGIN" => "plugin", "UDCS" => "udc",
-                    "POWER" => "power", "BASEUS" => "base-us", _ => "proc",
+                    "POWER" => "power", "BASEUS" => "base-us", "IPCF" => "ipcf", _ => "proc",
                 }),
                 None => l.into(),
             }).collect::<Vec<_>>().join("\n");
@@ -753,6 +812,47 @@ esac"#);
         assert_eq!(d.read("pss").trim(), "0");
         d.run(DISCONNECT).unwrap();
         assert_eq!(d.calls().last().unwrap(), "lipc preventScreenSaver 0");
+    }
+
+    /// Firmware 5.19: no lipc properties for com.lab126.mtp, the helper does start and stop.
+    #[test]
+    fn firmware_519_uses_the_ipcf_helper() {
+        let d = Dev::new("fw519");
+        d.put("fw519", "");
+        d.rm("lipc_isMtpStarted");
+        let s = d.run(STATUS).unwrap();
+        assert_eq!((s.code.as_str(), s.state.as_str()), ("", "idle"));
+        d.put("host", LOG_HOST);
+        let s = d.run(CONNECT).unwrap();
+        assert_eq!(s.state, "connected");
+        assert_eq!(steps(&d), ["lipc preventScreenSaver 1", "mtp.sh udc disable", "ipcf stop", "ipcf start", "dbus --system --dest=com.lab126.mtp --type=signal"]);
+        assert!(!d.read("gets").contains("isMtpStarted"));
+        // stop goes through the helper; the unbound UDC reads as stopped, so .mtp-tmp is cleaned
+        std::fs::create_dir_all(d.0.join("base-us/.mtp-tmp")).unwrap();
+        d.put("calls", "");
+        let s = d.run(DISCONNECT).unwrap();
+        assert_eq!(s.state, "idle");
+        assert_eq!(steps(&d), ["ipcf stop", "mtp.sh udc disable", "sync", "lipc preventScreenSaver 0"]);
+        assert!(!d.0.join("base-us/.mtp-tmp").exists());
+        // a refused start tears down through the helper
+        d.put("calls", "");
+        d.put("refuse_ipcf_start", "");
+        assert!(d.run(CONNECT).is_err());
+        assert_eq!(steps(&d)[3..], ["ipcf start", "ipcf stop", "mtp.sh udc disable", "sync", "lipc preventScreenSaver 0"]);
+        // the UDC comes back only after the signal (state 2 -> 3): connect waits for it
+        d.rm("refuse_ipcf_start");
+        d.run(DISCONNECT).unwrap();
+        d.put("late_rebind", "");
+        assert_eq!(d.run(CONNECT).unwrap().state, "connected");
+        // the plugin's copy wins when installed
+        std::fs::create_dir_all(d.0.join("plugin/bin")).unwrap();
+        std::fs::copy(d.0.join("ipcf"), d.0.join("plugin/bin/kindlemtp-ipcf")).unwrap();
+        d.rm("ipcf");
+        assert_eq!(d.run(STATUS).unwrap().code, "");
+        d.rm("plugin/bin/kindlemtp-ipcf");
+        // no helper and no lipc: unsupported
+        d.rm("fw519");
+        assert_eq!(d.run(STATUS).unwrap().code, "no_lipc");
     }
 
     #[test]
