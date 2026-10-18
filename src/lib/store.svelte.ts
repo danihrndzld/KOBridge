@@ -23,6 +23,7 @@ export function explain(raw: string, fallback?: string) {
       'La Kindle no responde en ninguna de sus IPs conocidas. Si la Terminal sí llega, dale permiso a KOBridge en Ajustes del Sistema → Privacidad y seguridad → Red local.')
   if (/timed out/i.test(raw)) return t('The Kindle didn\'t answer in time. Its Wi-Fi may be asleep, so tap the screen and try again.', 'La Kindle no respondió a tiempo. Puede que su Wi-Fi esté dormido: tocá la pantalla y reintentá.')
   if (/Connection refused/i.test(raw)) return t('The Kindle is on the network, but the KOReader SSH server is off.', 'La Kindle está en la red pero el servidor SSH de KOReader está apagado.')
+  if (/Host key verification failed/i.test(raw)) return t('The Kindle\'s SSH fingerprint isn\'t saved, or it changed. Press Test in Settings to save it; if it changed, remove the old entry from ~/.ssh/known_hosts first.', 'La huella SSH de la Kindle no está guardada o cambió. Tocá Probar en Configuración para guardarla; si cambió, primero borrá la entrada vieja de ~/.ssh/known_hosts.')
   if (/Permission denied/i.test(raw)) return t('The Kindle rejected the SSH key.', 'La Kindle rechazó la llave SSH.')
   return fallback ?? t('Couldn\'t connect to the Kindle.', 'No pude conectar con la Kindle.')
 }
