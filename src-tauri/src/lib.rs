@@ -161,20 +161,28 @@ async fn backup_to(app: AppHandle, stamp: &str, extra: &[String], on: impl FnMut
     let s = get_settings(app);
     let dir = PathBuf::from(&s.backup_dir);
     std::fs::create_dir_all(&dir).map_err(e)?;
-    let cmd = format!("{} && tar -cf - -T /tmp/kob-list; r=$?; rm -f /tmp/kob-list; exit $r", backup_list_cmd(s.backup_books, extra));
     let dest = dir.join(format!("kindle-{stamp}.tar"));
-    ssh::pull_to_file(&cmd, &dest, on).await?;
+    ssh::pull_to_file(&backup_cmd(s.backup_books, extra), &dest, on).await
+        .map_err(|m| if m.starts_with("ssh ") { tr(format!("backup failed ({m})"), format!("falló el respaldo ({m})")) } else { m })?;
     Ok(file_info(&dest).ok_or(tr("couldn't read the backup", "no se pudo leer el respaldo"))?)
 }
 
+/// Remote command that streams the backup tar to stdout.
+fn backup_cmd(books: bool, more: &[String]) -> String {
+    format!("{} && tar -cf - -T /tmp/kob-list; r=$?; rm -f /tmp/kob-list; exit $r", backup_list_cmd(books, more))
+}
+
 /// Shell that writes the backup's path list to /tmp/kob-list, run from /mnt/us.
+/// `find` only gets the roots that exist (many Kindles have no books/), so a missing one doesn't fail the
+/// list; with none it isn't run at all, since `find` with no path would list the cwd.
 fn backup_list_cmd(books: bool, more: &[String]) -> String {
     let (sdr_roots, books_dir) = if books { ("documents", "books") } else { ("books documents", "") };
     let extra = format!("{books_dir} {}", more.iter().map(|p| sq(p)).collect::<Vec<_>>().join(" "));
     format!(
         "cd /mnt/us && {{ for p in koreader/settings koreader/settings.reader.lua koreader/history.lua \
          koreader/defaults.custom.lua koreader/patches koreader/styletweaks {extra}; do [ -e \"$p\" ] && echo \"$p\"; done; \
-         find {sdr_roots} -type d -name '*.sdr' ! -path '*/dictionaries/*' 2>/dev/null; }} > /tmp/kob-list")
+         d=$(for p in {sdr_roots}; do [ -d \"$p\" ] && echo \"$p\"; done); \
+         [ -z \"$d\" ] || find $d -type d -name '*.sdr' ! -path '*/dictionaries/*' 2>/dev/null; }} > /tmp/kob-list")
 }
 
 #[derive(Serialize)]
@@ -185,7 +193,7 @@ struct BackupSize { books_bytes: u64, books_files: u64, base_bytes: u64, full_by
 async fn backup_size() -> Res<BackupSize> {
     let du = "tr '\\n' '\\000' < /tmp/kob-list | xargs -0 du -sk | awk '{s+=$1} END {print s+0}'";
     let out = ssh::run(&format!(
-        "{base} && {du} && {full} && {du} && du -sk /mnt/us/books | cut -f1 && find /mnt/us/books -type f | wc -l; rm -f /tmp/kob-list",
+        "{base} && {du} && {full} && {du} && {{ if [ -d {BOOKS} ]; then du -sk {BOOKS} | cut -f1 && find {BOOKS} -type f | wc -l; else echo 0 0; fi; }}; rm -f /tmp/kob-list",
         base = backup_list_cmd(false, &[]), full = backup_list_cmd(true, &[]))).await?;
     let n: Vec<u64> = out.split_whitespace().filter_map(|v| v.parse().ok()).collect();
     let [base_kb, full_kb, books_kb, books_files] = n[..] else { return Err(tr(format!("unexpected du output: {out}"), format!("respuesta inesperada de du: {out}"))) };
@@ -795,6 +803,36 @@ mod tests {
         assert!(allowed("/mnt/us/fonts/a/b.ttf").is_err());
         assert!(allowed("/etc/passwd").is_err());
     }
+
+    /// Runs the backup list command in a local sh on a fake /mnt/us that has documents/ but no books/.
+    #[test]
+    fn backup_list_without_books_dir() {
+        let root = std::env::temp_dir().join(format!("kob-list-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("us/koreader/settings")).unwrap();
+        std::fs::create_dir_all(root.join("us/documents/A.sdr")).unwrap();
+        let list = root.join("kob-list");
+        let run = |cmd: String| {
+            let cmd = cmd.replace("/mnt/us", &root.join("us").to_string_lossy())
+                .replace("/tmp/kob-list", &list.to_string_lossy());
+            let ok = std::process::Command::new("sh").arg("-c").arg(cmd).status().unwrap().success();
+            (ok, std::fs::read_to_string(&list).unwrap_or_default())
+        };
+        for books in [false, true] {
+            let (ok, out) = run(super::backup_list_cmd(books, &[]));
+            assert!(ok, "books={books}");
+            assert_eq!(out, "koreader/settings\ndocuments/A.sdr\n");
+        }
+        std::fs::remove_dir_all(root.join("us/documents")).unwrap();
+        let (ok, out) = run(super::backup_list_cmd(false, &[]));
+        assert!(ok);
+        assert_eq!(out, "koreader/settings\n");
+        // a list that can't be written still fails
+        std::fs::remove_file(&list).unwrap();
+        std::fs::create_dir_all(&list).unwrap();
+        assert!(!run(super::backup_list_cmd(false, &[])).0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// Against the real Kindle: `cargo test -- --ignored --nocapture`
@@ -839,12 +877,8 @@ mod live {
             // backup: same remote command as backup_run, settings + sidecars only
             let dir = std::env::temp_dir().join("kob-live-backup");
             std::fs::create_dir_all(&dir).unwrap();
-            let cmd = "cd /mnt/us && { for p in koreader/settings koreader/settings.reader.lua koreader/history.lua \
-                 koreader/defaults.custom.lua koreader/patches koreader/styletweaks ; do [ -e \"$p\" ] && echo \"$p\"; done; \
-                 find books documents -type d -name '*.sdr' ! -path '*/dictionaries/*' 2>/dev/null; } > /tmp/kob-list && \
-                 tar -cf - -T /tmp/kob-list; r=$?; rm -f /tmp/kob-list; exit $r";
             let tar = dir.join("t.tar");
-            let n = ssh::pull_to_file(cmd, &tar, |_| {}).await.expect("backup");
+            let n = ssh::pull_to_file(&backup_cmd(false, &[]), &tar, |_| {}).await.expect("backup");
             let listing = std::process::Command::new("tar").arg("-tf").arg(&tar).output().unwrap();
             let names = String::from_utf8_lossy(&listing.stdout);
             println!("backup {} MB, {} entries", n / 1024 / 1024, names.lines().count());
