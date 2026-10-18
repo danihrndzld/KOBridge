@@ -16,7 +16,7 @@ export const app = $state({
 /** Turn ssh's stderr into a next step; keep the raw text for details. */
 export function explain(raw: string, fallback?: string) {
   const mac = navigator.userAgent.includes('Mac')
-  if (/resolve hostname kindle/i.test(raw))
+  if (/resolve hostname kindle|no kindle entry|no tiene la entrada kindle/i.test(raw))
     return t('~/.ssh/config has no kindle entry yet. Open Settings to set up the connection.', '~/.ssh/config todavía no tiene la entrada kindle. Abrí Configuración para preparar la conexión.')
   if (/ninguna de sus IPs|none of its known IPs|No route to host|Network is unreachable/i.test(raw))
     return !mac ? t('The Kindle doesn\'t answer on any of its known IPs. Check that it is on the same network as this computer.', 'La Kindle no responde en ninguna de sus IPs conocidas. Revisá que esté en la misma red que esta computadora.') : t('The Kindle doesn\'t answer on any of its known IPs. If Terminal can reach it, allow KOBridge in System Settings → Privacy & Security → Local Network.',
